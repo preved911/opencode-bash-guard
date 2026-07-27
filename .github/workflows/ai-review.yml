@@ -1,7 +1,5 @@
 name: AI PR Review
-on:
-  pull_request:
-    types: [opened, synchronize]
+on: pull_request
 
 jobs:
   review:
@@ -11,64 +9,11 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@v4
-      - name: Get PR diff
-        id: diff
-        run: |
-          gh pr view ${{ github.event.pull_request.number }} --json body,title,headRefName,baseRefName --jq '{title,body,headRefName,baseRefName}' > /tmp/pr-meta.json
-          gh pr diff ${{ github.event.pull_request.number }} > /tmp/pr-diff.txt
-          echo "diff_size=$(wc -c < /tmp/pr-diff.txt)" >> $GITHUB_OUTPUT
+      - name: Run AI review
+        run: python3 .github/scripts/review.py
         env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PR_NUM: ${{ github.event.pull_request.number }}
           GH_TOKEN: ${{ github.token }}
-      - name: Truncate diff if too large
-        run: |
-          MAX=60000
-          if [ "$(wc -c < /tmp/pr-diff.txt)" -gt "$MAX" ]; then
-            head -c $MAX /tmp/pr-diff.txt > /tmp/pr-diff-trunc.txt
-            echo -e "\n\n[Diff truncated to $MAX bytes]" >> /tmp/pr-diff-trunc.txt
-            mv /tmp/pr-diff-trunc.txt /tmp/pr-diff.txt
-          fi
-      - name: Generate review via Gemini
-        id: review
-        run: |
-          PR_TITLE=$(jq -r '.title' /tmp/pr-meta.json)
-          PR_BODY=$(jq -r '.body' /tmp/pr-meta.json)
-          DIFF=$(cat /tmp/pr-diff.txt)
-          cat > /tmp/prompt.json << 'EOF'
-          {
-            "contents": [{
-              "parts": [{
-                "text": "You are a senior TypeScript code reviewer. Review this pull request and provide concise, actionable feedback. Focus on:\n- Logic errors or bugs\n- Security issues\n- Performance problems\n- Code quality / maintainability\n- Missing error handling\n- Deviations from project conventions\n\nBe specific: cite file paths and line numbers. Be constructive. If the code looks fine, say so briefly.\n\n---\nPR Title: __TITLE__\nPR Description: __BODY__\n\n```diff\n__DIFF__\n```"
-              }]
-            }]
-          }
-          EOF
-          sed -i "s|__TITLE__|$PR_TITLE|g; s|__BODY__|$PR_BODY|g" /tmp/prompt.json
-          python3 -c "
-import json, sys
-with open('/tmp/prompt.json') as f:
-    data = json.load(f)
-with open('/tmp/pr-diff.txt') as f:
-    diff = f.read()
-data['contents'][0]['parts'][0]['text'] = data['contents'][0]['parts'][0]['text'].replace('__DIFF__', diff)
-with open('/tmp/payload.json', 'w') as f:
-    json.dump(data, f, ensure_ascii=False)
-"
-          curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${{ secrets.GEMINI_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            -d @/tmp/payload.json > /tmp/response.json
-          python3 -c "
-import json
-with open('/tmp/response.json') as f:
-    resp = json.load(f)
-try:
-    text = resp['candidates'][0]['content']['parts'][0]['text']
-except (KeyError, IndexError):
-    text = f'Review failed: {json.dumps(resp, indent=2)}'
-with open('/tmp/review.md', 'w') as f:
-    f.write(text)
-"
-      - name: Post review comment
-        run: |
-          gh pr comment ${{ github.event.pull_request.number }} --body "$(cat /tmp/review.md)"
-        env:
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_API_URL: ${{ github.api_url }}
