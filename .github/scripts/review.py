@@ -55,7 +55,7 @@ Review the PR and respond in JSON with two parts:
 
 Guidelines:
 - Skip fluff and praise — only actual observations
-- If everything looks fine, summary can be "Looks good to me."
+- If everything looks fine, summary can be "LGTM"
 - 0-3 inline comments — only for real issues or questions
 - Be direct: "Use Set instead of Array for dedup" not "What do you think about..."
 
