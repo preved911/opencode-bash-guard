@@ -6,7 +6,7 @@ An opencode plugin that guards against chained bash command injection. When `git
 
 opencode's `permission.bash` matches glob patterns against the full command string. Chaining (`&&`, `||`, `;`, `|`) lets dangerous commands hide behind safe prefixes — `git status && rm -rf /` starts with `git` and matches `"git *": "allow"`. This plugin closes that gap by splitting chains and evaluating each segment independently. On any parse error the entire command is denied (fail-closed).
 
-## How It Works
+## How it works
 
 1. **Chain Detection**: Parses the command with `unbash` AST into individual segments (including `$()` and backtick substitutions, `eval`, `sh -c`, etc.)
 2. **Path Extraction**: Walks the AST to extract file paths, using `@withfig/autocomplete` specs to distinguish flags from paths
@@ -25,7 +25,7 @@ Add to your `opencode.json`:
 
 ## Prerequisite
 
-Your bash permission must use `"*": "ask"` as the fallback (never `"allow"`):
+Your bash permission **must** use `"*": "ask"` as the fallback pattern. Without this catch-all, commands that don't match any explicit rule would bypass permission checks:
 
 ```json
 {
@@ -39,9 +39,19 @@ Your bash permission must use `"*": "ask"` as the fallback (never `"allow"`):
 }
 ```
 
-If `"bash": "allow"` or `"*": "allow"`, the plugin disables itself with a warning.
+If `"bash": "allow"` or `"*": "allow"` is set, the plugin disables itself with a warning — allowing all bash commands defeats the purpose of chain-level guards.
 
-## How It Reads Your Config
+## Example
+
+| Command | Segments | Bash match | Chain action | Why |
+|---|---|---|---|---|
+| `git status` | `git status` | `"git *": "allow"` | `allow` | single segment, explicitly allowed |
+| `git status && git log` | `git status`, `git log` | both `"git *": "allow"` | `ask` | multi-segment — defense-in-depth |
+| `sudo rm -rf /` | `sudo rm -rf /` | none → `"*": "ask"` | `ask` | catches unknown dangerous commands |
+| `git status && sudo rm -rf /` | `git status`, `sudo rm -rf /` | `sudo rm -rf /` → `"*": "ask"` | `deny` | parse error → fail closed |
+| `echo "hello` | (parse error — unbalanced quote) | — | `deny` | fail closed |
+
+## How it reads your config
 
 The plugin registers a `config` hook that receives the fully merged Config object at startup (opencode merges remote, global, project, and managed layers). It reads:
 
