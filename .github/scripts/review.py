@@ -126,7 +126,7 @@ for c in review_data.get('comments', []):
     valid_comments.append({'path': path, 'line': line, 'side': side, 'body': body})
 
 if invalid_comments:
-    extra = '\n\n*Couldn't place inline comments for:*\n' + '\n'.join(
+    extra = "\n\n*Couldn't place inline comments for:*\n" + '\n'.join(
         f"- `{c.get('path','?')}:{c.get('line','?')}` — {c.get('body','')[:80]}"
         for c in invalid_comments
     )
