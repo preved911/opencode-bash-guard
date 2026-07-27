@@ -23,8 +23,8 @@
 - [ ] 3.2 Extract top-level commands from AST as chain segments (split on `&&`, `||`, `;`, `|`)
 - [ ] 3.3 Recursively walk AST to extract commands from `$()` and backtick substitutions
 - [ ] 3.4 Recognize `eval`, `sh -c`, `bash -c`, `zsh -c` meta-commands; recursively parse their string arguments as command strings
-- [ ] 3.4 Handle parse errors gracefully (collect errors, return partial result)
-- [ ] 3.5 Write unit tests for all scenarios in `specs/chain-detection/spec.md`
+- [ ] 3.5 Handle parse errors gracefully (collect errors, return partial result)
+- [ ] 3.6 Write unit tests for all scenarios in `specs/chain-detection/spec.md`
 
 ## 4. Path Extraction
 

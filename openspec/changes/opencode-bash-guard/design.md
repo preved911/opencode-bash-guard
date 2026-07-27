@@ -25,7 +25,7 @@ The user's config: `"bash": { "*": "ask", "git *": "allow", "go mod tidy*": "all
 
 1. **Chain parser using `unbash`** — Zero-dependency TypeScript bash AST parser. Parses the full command string into AST. Extract each top-level command (separated by `&&`, `||`, `;`, `|`, newlines) as a segment. Additionally, recursively walk the AST to extract commands nested inside `$(...)` and backtick `` `...` `` substitutions. Also recognize meta-commands (`eval`, `sh -c`, `bash -c`, `zsh -c`) and recursively parse their string arguments as command strings. More reliable than regex — handles quotes, escapes, substitutions correctly.
 
-2. **Path extraction via `unbash` AST + `@withfig/autocomplete`** — Walk the AST of each segment to find word arguments. `@withfig/autocomplete` specs distinguish flags from path arguments. Fallback: tokens not starting with `-` are potential paths. Resolve relative paths against cwd.
+2. **Path extraction via `unbash` AST + optional `@withfig/autocomplete`** — Walk the AST of each segment to find word arguments. Use heuristic first (skip tokens starting with `-`). Optionally load `@withfig/autocomplete` specs to distinguish flags from path arguments more accurately — loaded lazily only when needed, not at startup. Resolve relative paths against cwd.
 
 3. **Read config via opencode's `config` hook** — The plugin registers a `config` hook that receives the fully merged Config object (remote + global + project + managed layers). Extract:
    - `permission.bash` patterns — glob patterns for command matching with allow/ask/deny actions
@@ -57,7 +57,7 @@ The user's config: `"bash": { "*": "ask", "git *": "allow", "go mod tidy*": "all
 
 ## Risks / Trade-offs
 
-- **[Path extraction misses]** Fig may not have specs for all commands. Mitigation: simple heuristic fallback (skip `-*` tokens).
+- **[Path extraction misses]** Fig may not have specs for all commands. Mitigation: heuristic fallback (skip `-*` tokens). Fig is loaded lazily, not at startup.
 - **[Config availability]** `config` hook fires once at startup. If the config changes at runtime, the plugin won't see it. Mitigation: config changes require opencode restart anyway.
 - **[Performance]** AST parsing is heavier than string scanning. Mitigation: unbash is fast, only parse when chain is detected.
 - **[unbash parsing edge cases]** Complex shell syntax may cause partial parses. Mitigation: any parse error causes the plugin to deny the entire command (fail closed).
