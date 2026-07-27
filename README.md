@@ -55,3 +55,5 @@ No custom configuration files or duplicated rules needed.
 - **Performance**: AST parsing is heavier than string scanning, but only runs when chain ops are detected.
 - **unbash edge cases**: Complex shell syntax may cause partial parses. The plugin denies the entire command (fail closed) on any parse error.
 - **Not a sandbox**: Focused on chain-splitting with path awareness, not comprehensive shell obfuscation detection.
+
+
