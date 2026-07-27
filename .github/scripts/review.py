@@ -2,7 +2,7 @@ import json, os, sys, time, urllib.request
 
 PR_NUM = os.environ['PR_NUM']
 GH_TOKEN = os.environ['GH_TOKEN']
-GEMINI_KEY = os.environ.get('GEMINI_API_KEY', '')
+GROQ_KEY = os.environ.get('GROQ_API_KEY', '')
 GITHUB_API = os.environ.get('GITHUB_API_URL', 'https://api.github.com')
 REPO = os.environ['GITHUB_REPOSITORY']
 
@@ -35,17 +35,25 @@ if len(diff) > MAX_DIFF:
 prompt = f"You are a senior TypeScript code reviewer. Review this PR. Cite file paths and line numbers. Be concise.\n\nPR: {pr['title']}\n\n```diff\n{diff}\n```"
 
 payload = json.dumps({
-    'contents': [{'parts': [{'text': prompt}]}]
+    'model': 'llama-3.1-70b-versatile',
+    'messages': [
+        {'role': 'user', 'content': prompt},
+    ],
 }).encode()
-
-url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}'
 
 for attempt in range(3):
     try:
-        req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+        req = urllib.request.Request(
+            'https://api.groq.com/openai/v1/chat/completions',
+            data=payload,
+            headers={
+                'Authorization': f'Bearer {GROQ_KEY}',
+                'Content-Type': 'application/json',
+            },
+        )
         with urllib.request.urlopen(req) as r:
             resp = json.loads(r.read())
-        review_text = resp['candidates'][0]['content']['parts'][0]['text']
+        review_text = resp['choices'][0]['message']['content']
         break
     except urllib.error.HTTPError as e:
         body = e.read().decode()
