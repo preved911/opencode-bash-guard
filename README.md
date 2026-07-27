@@ -81,3 +81,4 @@ No custom configuration required. The plugin reads your existing `permission.bas
 
 ISC
 # verify2
+# verify3
