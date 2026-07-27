@@ -1,6 +1,5 @@
 import json, os, sys, urllib.request
 
-GEMINI_API_KEY = os.environ['GEMINI_API_KEY']
 PR_NUM = os.environ['PR_NUM']
 GH_TOKEN = os.environ['GH_TOKEN']
 GITHUB_API = os.environ.get('GITHUB_API_URL', 'https://api.github.com')
@@ -31,34 +30,29 @@ MAX_DIFF = 60000
 if len(diff) > MAX_DIFF:
     diff = diff[:MAX_DIFF] + '\n\n[Diff truncated to {} bytes]'.format(MAX_DIFF)
 
-prompt_text = f"""You are a senior TypeScript code reviewer. Review this pull request and provide concise, actionable feedback. Focus on:
-- Logic errors or bugs
-- Security issues
-- Performance problems
-- Code quality / maintainability
-- Missing error handling
-- Deviations from project conventions
-
-Be specific: cite file paths and line numbers. Be constructive. If the code looks fine, say so briefly.
-
----
-PR Title: {pr['title']}
-PR Description: {pr['body'] or ''}
-
-```diff
-{diff}
-```"""
+system_prompt = 'You are a senior TypeScript code reviewer. Be concise and specific. Cite file paths and line numbers.'
+user_prompt = f'Review this PR:\nTitle: {pr["title"]}\n\n```diff\n{diff}\n```'
 
 payload = json.dumps({
-    'contents': [{'parts': [{'text': prompt_text}]}]
+    'model': 'gpt-4o-mini',
+    'messages': [
+        {'role': 'system', 'content': system_prompt},
+        {'role': 'user', 'content': user_prompt},
+    ],
 }).encode()
 
-gemini_url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}'
-gemini_req = urllib.request.Request(gemini_url, data=payload, headers={'Content-Type': 'application/json'})
+req = urllib.request.Request(
+    'https://models.inference.ai.azure.com/chat/completions',
+    data=payload,
+    headers={
+        'Authorization': f'Bearer {GH_TOKEN}',
+        'Content-Type': 'application/json',
+    },
+)
 try:
-    with urllib.request.urlopen(gemini_req) as r:
+    with urllib.request.urlopen(req) as r:
         resp = json.loads(r.read())
-    review_text = resp['candidates'][0]['content']['parts'][0]['text']
+    review_text = resp['choices'][0]['message']['content']
 except Exception as e:
     review_text = f'Review failed: {e}'
 
