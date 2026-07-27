@@ -12,7 +12,6 @@ jobs:
       - name: Run AI review
         run: python3 .github/scripts/review.py
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PR_NUM: ${{ github.event.pull_request.number }}
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
