@@ -80,3 +80,4 @@ No custom configuration required. The plugin reads your existing `permission.bas
 ## License
 
 ISC
+# verify2
