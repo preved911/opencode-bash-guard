@@ -1,0 +1,13 @@
+name: Code Review
+on:
+  pull_request:
+    types: [opened, synchronize]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: AI Code Review
+        uses: coderabbitai/ai-code-review-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
