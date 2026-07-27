@@ -1,0 +1,39 @@
+name: AI PR Review
+on: pull_request
+
+env:
+  GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Diagnose API key
+        run: |
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "::error::GEMINI_API_KEY secret is NOT SET or is empty"
+            exit 1
+          fi
+          echo "GEMINI_API_KEY is set (length: ${#GEMINI_API_KEY})"
+          echo "Testing endpoint..."
+          STATUS=$(curl -s -o /tmp/gemini-test.json -w "%{http_code}" \
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{"contents":[{"parts":[{"text":"Say OK"}]}]}')
+          if [ "$STATUS" = "200" ]; then
+            echo "Gemini API: OK (200)"
+          else
+            echo "::warning::Gemini API returned HTTP $STATUS"
+            cat /tmp/gemini-test.json
+          fi
+      - name: Run AI review
+        run: python3 .github/scripts/review.py
+        env:
+          PR_NUM: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_API_URL: ${{ github.api_url }}

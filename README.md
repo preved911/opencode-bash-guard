@@ -48,6 +48,8 @@ The plugin registers a `config` hook to receive the merged Config object at star
 
 No custom configuration files or duplicated rules needed.
 
+ISC
+
 ## Known Limitations
 
 - **Config changes at runtime**: The `config` hook fires once at startup. Config changes require an opencode restart.
