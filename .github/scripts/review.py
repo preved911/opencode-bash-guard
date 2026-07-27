@@ -2,7 +2,7 @@ import json, os, sys, time, urllib.request
 
 PR_NUM = os.environ['PR_NUM']
 GH_TOKEN = os.environ['GH_TOKEN']
-GROQ_KEY = os.environ.get('GROQ_API_KEY', '')
+GH_MODELS_TOKEN = os.environ.get('GH_MODELS_TOKEN', '')
 GITHUB_API = os.environ.get('GITHUB_API_URL', 'https://api.github.com')
 REPO = os.environ['GITHUB_REPOSITORY']
 
@@ -28,14 +28,14 @@ diff_req = urllib.request.Request(pr['diff_url'], headers={'Authorization': f'Be
 with urllib.request.urlopen(diff_req) as r:
     diff = r.read().decode()
 
-MAX_DIFF = 60000
+MAX_DIFF = 7500
 if len(diff) > MAX_DIFF:
     diff = diff[:MAX_DIFF] + '\n\n[Diff truncated to {} bytes]'.format(MAX_DIFF)
 
 prompt = f"You are a senior TypeScript code reviewer. Review this PR. Cite file paths and line numbers. Be concise.\n\nPR: {pr['title']}\n\n```diff\n{diff}\n```"
 
 payload = json.dumps({
-    'model': 'llama-3.1-70b-versatile',
+    'model': 'gpt-4o-mini',
     'messages': [
         {'role': 'user', 'content': prompt},
     ],
@@ -44,10 +44,10 @@ payload = json.dumps({
 for attempt in range(3):
     try:
         req = urllib.request.Request(
-            'https://api.groq.com/openai/v1/chat/completions',
+            'https://models.inference.ai.azure.com/chat/completions',
             data=payload,
             headers={
-                'Authorization': f'Bearer {GROQ_KEY}',
+                'Authorization': f'Bearer {GH_MODELS_TOKEN}',
                 'Content-Type': 'application/json',
             },
         )
