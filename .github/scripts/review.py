@@ -43,22 +43,21 @@ if len(diff) > MAX_DIFF:
 
 changed_files = '\n'.join(f"- `{f['filename']}` ({f['status']}, +{f['additions']}/-{f['deletions']})" for f in files[:20])
 
-prompt = f"""You are a thoughtful senior engineer doing a code review on a colleague's PR. Be human.
+prompt = f"""You are a senior engineer reviewing a PR. Be direct and concise.
 
-Review the PR below and respond in JSON format with two parts:
-1. "summary": a friendly, conversational overview of the PR (2-4 paragraphs)
-2. "comments": an array of inline comments on specific lines. Each comment has:
+Review the PR and respond in JSON with two parts:
+1. "summary": 1-3 sentence overview — only call out what matters
+2. "comments": inline comments on specific lines (optional). Each has:
    - "path": file path
-   - "line": line number in the file
-   - "side": "RIGHT" (for new/changed lines)
-   - "body": your comment (friendly tone, specific, actionable)
+   - "line": line number
+   - "side": "RIGHT"
+   - "body": your comment (short, specific, actionable)
 
 Guidelines:
-- Start with what's done well, then suggest improvements
-- Be curious, not commanding — "What do you think about…?" instead of "Fix this"
-- Only add inline comments for genuinely interesting observations
-- Don't inline-comment trivial things (typos, formatting are fine)
-- 0-5 inline comments is ideal — quality over quantity
+- Skip fluff and praise — only actual observations
+- If everything looks fine, summary can be "Looks good to me."
+- 0-3 inline comments — only for real issues or questions
+- Be direct: "Use Set instead of Array for dedup" not "What do you think about..."
 
 PR title: {pr['title']}
 PR description: {pr.get('body', '(none)') or '(none)'}
@@ -74,7 +73,7 @@ Diff:
 payload = json.dumps({
     'model': 'gpt-4o-mini',
     'messages': [
-        {'role': 'system', 'content': 'You are a friendly senior engineer. Always respond in valid JSON: {{"summary": "...", "comments": [{{"path": "...", "line": 0, "side": "RIGHT", "body": "..."}}]}}'},
+        {'role': 'system', 'content': 'You are a senior engineer doing code review. Be concise and direct. Respond in valid JSON: {{"summary": "...", "comments": [{{"path": "...", "line": 0, "side": "RIGHT", "body": "..."}}]}}'},
         {'role': 'user', 'content': prompt},
     ],
     'response_format': {'type': 'json_object'},
