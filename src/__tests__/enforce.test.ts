@@ -117,6 +117,16 @@ describe("beforeExecute", () => {
     expect(result.shouldWrap).toBe(false);
   });
 
+  it("handles lowercase bash tool name", () => {
+    const result = beforeExecute("bash", "test-call-1", "/", { command: "git status && sudo rm" }, defaultConfig);
+    expect(result.chainAction).toBe("deny");
+  });
+
+  it("handles capitalized Bash tool name", () => {
+    const result = beforeExecute("Bash", "test-call-1", "/", { command: "git status && sudo rm" }, defaultConfig);
+    expect(result.chainAction).toBe("deny");
+  });
+
   it("wraps and stores deny for parse errors", () => {
     const result = beforeExecute("Bash", "test-call-1", "/", { command: "echo \"hello" }, defaultConfig);
     expect(result.chainAction).toBe("deny");

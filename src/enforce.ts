@@ -70,7 +70,7 @@ export function beforeExecute(
   args: any,
   config: PluginConfig,
 ): { shouldWrap: boolean; chainAction: ChainAction } {
-  if (tool !== "Bash") {
+  if (tool.toLowerCase() !== "bash") {
     return { shouldWrap: false, chainAction: null };
   }
 
