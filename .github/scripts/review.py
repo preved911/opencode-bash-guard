@@ -1,4 +1,4 @@
-import json, os, sys, time, urllib.request
+import json, os, sys, time, re, urllib.request
 
 PR_NUM = os.environ['PR_NUM']
 GH_TOKEN = os.environ['GH_TOKEN']
@@ -7,40 +7,79 @@ GITHUB_API = os.environ.get('GITHUB_API_URL', 'https://api.github.com')
 REPO = os.environ['GITHUB_REPOSITORY']
 
 
-def gh_api(method, path, data=None):
+def gh_api(method, path, data=None, raw=False):
     url = f'{GITHUB_API}/repos/{REPO}{path}'
     headers = {
         'Authorization': f'Bearer {GH_TOKEN}',
         'Accept': 'application/vnd.github+json',
     }
+    if data is not None:
+        headers['Content-Type'] = 'application/json'
     body = json.dumps(data).encode() if data else None
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req) as r:
+            if raw:
+                return r.read().decode()
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
-        print(f'GitHub API error {e.code}: {e.read().decode()}', file=sys.stderr)
-        sys.exit(1)
+        error_body = e.read().decode()
+        print(f'GitHub API error {e.code}: {error_body}', file=sys.stderr)
+        if raw:
+            return None
+        return None
 
 
 pr = gh_api('GET', f'/pulls/{PR_NUM}')
+files = gh_api('GET', f'/pulls/{PR_NUM}/files')
+
 diff_req = urllib.request.Request(pr['diff_url'], headers={'Authorization': f'Bearer {GH_TOKEN}'})
 with urllib.request.urlopen(diff_req) as r:
     diff = r.read().decode()
 
-MAX_DIFF = 7500
+MAX_DIFF = 12000
 if len(diff) > MAX_DIFF:
     diff = diff[:MAX_DIFF] + '\n\n[Diff truncated to {} bytes]'.format(MAX_DIFF)
 
-prompt = f"You are a senior TypeScript code reviewer. Review this PR. Cite file paths and line numbers. Be concise.\n\nPR: {pr['title']}\n\n```diff\n{diff}\n```"
+changed_files = '\n'.join(f"- `{f['filename']}` ({f['status']}, +{f['additions']}/-{f['deletions']})" for f in files[:20])
+
+prompt = f"""You are a senior engineer reviewing a PR. Be direct and concise.
+
+Review the PR and respond in JSON with two parts:
+1. "summary": 1-3 sentence overview — only call out what matters
+2. "comments": inline comments on specific lines (optional). Each has:
+   - "path": file path
+   - "line": line number
+   - "side": "RIGHT"
+   - "body": your comment (short, specific, actionable)
+
+Guidelines:
+- Skip fluff and praise — only actual observations
+- If everything looks fine, summary can be "LGTM"
+- 0-3 inline comments — only for real issues or questions
+- Be direct: "Use Set instead of Array for dedup" not "What do you think about..."
+
+PR title: {pr['title']}
+PR description: {pr.get('body', '(none)') or '(none)'}
+
+Files changed:
+{changed_files}
+
+Diff:
+```diff
+{diff}
+```"""
 
 payload = json.dumps({
     'model': 'gpt-4o-mini',
     'messages': [
+        {'role': 'system', 'content': 'You are a senior engineer doing code review. Be concise and direct. Respond in valid JSON: {{"summary": "...", "comments": [{{"path": "...", "line": 0, "side": "RIGHT", "body": "..."}}]}}'},
         {'role': 'user', 'content': prompt},
     ],
+    'response_format': {'type': 'json_object'},
 }).encode()
 
+review_data = None
 for attempt in range(3):
     try:
         req = urllib.request.Request(
@@ -53,17 +92,61 @@ for attempt in range(3):
         )
         with urllib.request.urlopen(req) as r:
             resp = json.loads(r.read())
-        review_text = resp['choices'][0]['message']['content']
+        review_data = json.loads(resp['choices'][0]['message']['content'])
         break
     except urllib.error.HTTPError as e:
         body = e.read().decode()
         if e.code == 429 and attempt < 2:
             time.sleep(5)
             continue
-        review_text = f'Review failed (attempt {attempt + 1}/3): HTTP {e.code}'
+        review_data = {'summary': f'Had trouble generating the review (attempt {attempt + 1}/3): HTTP {e.code}.', 'comments': []}
     except Exception as e:
-        review_text = f'Review failed: {e}'
+        review_data = {'summary': f'Something went wrong: {e}', 'comments': []}
         break
 
-comment = gh_api('POST', f'/issues/{PR_NUM}/comments', {'body': review_text})
-print(f'Review posted as comment #{comment["id"]}')
+if review_data is None:
+    review_data = {'summary': 'Review could not be generated.', 'comments': []}
+
+valid_comments = []
+invalid_comments = []
+changed_paths = {f['filename']: f for f in files}
+
+for c in review_data.get('comments', []):
+    path = c.get('path', '')
+    line = c.get('line', 0)
+    side = c.get('side', 'RIGHT')
+    body = c.get('body', '')
+    if not path or not line or not body:
+        invalid_comments.append(c)
+        continue
+    if path not in changed_paths:
+        invalid_comments.append(c)
+        continue
+    valid_comments.append({'path': path, 'line': line, 'side': side, 'body': body})
+
+if invalid_comments:
+    extra = "\n\n*Couldn't place inline comments for:*\n" + '\n'.join(
+        f"- `{c.get('path','?')}:{c.get('line','?')}` — {c.get('body','')[:80]}"
+        for c in invalid_comments
+    )
+else:
+    extra = ''
+
+summary = review_data.get('summary', '')
+body = f"## 👀 AI Code Review\n\n{summary}{extra}\n\n---\n*Powered by GPT-4o via GitHub Models*"
+
+if valid_comments:
+    review = gh_api('POST', f'/pulls/{PR_NUM}/reviews', {
+        'body': body,
+        'event': 'COMMENT',
+        'comments': valid_comments,
+    })
+    if review:
+        print(f'Review submitted with {len(valid_comments)} inline comments')
+    else:
+        print('Inline review failed, posting as single comment', file=sys.stderr)
+        comment = gh_api('POST', f'/issues/{PR_NUM}/comments', {'body': body})
+        print(f'Review posted as comment #{comment["id"]}')
+else:
+    comment = gh_api('POST', f'/issues/{PR_NUM}/comments', {'body': body})
+    print(f'Review posted as comment #{comment["id"]}')

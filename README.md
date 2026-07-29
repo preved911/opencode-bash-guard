@@ -80,3 +80,11 @@ All tests are in `src/__tests__/`. Run `npm run test:watch` during development.
 - **Not a sandbox**: Focused on chain-splitting with path awareness, not comprehensive shell obfuscation detection. For full isolation, pair with a sandbox solution.
 
 
+
+## Usage
+
+Add to your `opencode.json`:
+
+```json
+{"plugin": ["opencode-bash-guard"]}
+```
