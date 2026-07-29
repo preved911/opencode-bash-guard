@@ -1,7 +1,9 @@
 import type { PluginConfig } from "./config.js";
 import { matchBashPermission, matchExternalDirectory } from "./config.js";
 import { parseChain } from "./chain.js";
+import type { ChainSegment, RedirectInfo } from "./chain.js";
 import { extractPaths } from "./paths.js";
+import path from "path";
 
 export type ChainAction = "allow" | "ask" | "deny" | null;
 
@@ -19,7 +21,43 @@ export function clearStoredDecision(callID: string): void {
   decisionStore.delete(callID);
 }
 
-export function resolveSegment(segment: string, segmentName: string, cwd: string, config: PluginConfig): ChainAction {
+function resolveRedirectTargets(redirects: RedirectInfo[], cwd: string, config: PluginConfig): ChainAction {
+  const actions: ChainAction[] = [];
+
+  for (const redir of redirects) {
+    if (redir.wellKnown) continue;
+
+    const resolvedPath = path.resolve(cwd, redir.target);
+    const underCwd = resolvedPath.startsWith(cwd + path.sep) || resolvedPath === cwd;
+
+    const editAction = matchBashPermission(resolvedPath, config.editRules);
+    if (editAction) actions.push(editAction);
+
+    if (!underCwd) {
+      const edResult = matchExternalDirectory(resolvedPath, config.externalDirectoryRules, config.externalDirectoryDefault, cwd);
+      if (edResult.violated && edResult.action) {
+        actions.push(edResult.action);
+      }
+    }
+  }
+
+  if (actions.length === 0) return null;
+  if (actions.includes("deny")) return "deny";
+  if (actions.includes("ask")) return "ask";
+  if (actions.includes("allow")) return "allow";
+  return null;
+}
+
+function combineActions(a: ChainAction, b: ChainAction): ChainAction {
+  const actions = [a, b].filter((x): x is NonNullable<ChainAction> => x !== null);
+  if (actions.length === 0) return null;
+  if (actions.includes("deny")) return "deny";
+  if (actions.includes("ask")) return "ask";
+  if (actions.includes("allow")) return "allow";
+  return null;
+}
+
+export function resolveSegment(segment: string, segmentName: string, cwd: string, config: PluginConfig, redirects?: RedirectInfo[]): ChainAction {
   const bashAction = matchBashPermission(segment, config.bashRules);
 
   const paths = extractPaths(segment, cwd);
@@ -34,23 +72,21 @@ export function resolveSegment(segment: string, segmentName: string, cwd: string
     }
   }
 
-  const actions: ChainAction[] = [];
-  if (bashAction) actions.push(bashAction);
-  if (edAction) actions.push(edAction);
+  let combined = combineActions(bashAction, edAction);
 
-  if (actions.length === 0) return null;
+  if (redirects && redirects.length > 0) {
+    const redirectAction = resolveRedirectTargets(redirects, cwd, config);
+    combined = combineActions(combined, redirectAction);
+  }
 
-  if (actions.includes("deny")) return "deny";
-  if (actions.includes("ask")) return "ask";
-  if (actions.includes("allow")) return "allow" as ChainAction;
-  return null;
+  return combined;
 }
 
-export function resolveChain(segments: Array<{ command: string; commandName: string }>, cwd: string, config: PluginConfig): ChainAction {
+export function resolveChain(segments: ChainSegment[], cwd: string, config: PluginConfig): ChainAction {
   const segmentActions: ChainAction[] = [];
 
   for (const seg of segments) {
-    const action = resolveSegment(seg.command, seg.commandName, cwd, config);
+    const action = resolveSegment(seg.command, seg.commandName, cwd, config, seg.redirects);
     segmentActions.push(action);
   }
 

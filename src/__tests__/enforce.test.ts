@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { resolveSegment, resolveChain, beforeExecute, handlePermissionAsk, clearStoredDecision } from "../enforce.js";
 import type { PluginConfig } from "../config.js";
+import type { ChainSegment } from "../chain.js";
 
 const defaultConfig: PluginConfig = {
   bashRules: [
@@ -8,6 +9,7 @@ const defaultConfig: PluginConfig = {
     { pattern: "git *", action: "allow" },
     { pattern: "sudo *", action: "deny" },
   ],
+  editRules: [],
   externalDirectoryRules: [
     { pattern: "./**", action: "allow" },
   ],
@@ -26,6 +28,7 @@ describe("resolveSegment", () => {
     const configNoMatch: PluginConfig = {
       ...defaultConfig,
       bashRules: [{ pattern: "*", action: "ask" }],
+      editRules: [],
     };
     const act = resolveSegment("cat /etc/passwd", "cat", "/project", configNoMatch);
     expect(act).not.toBeNull();
@@ -34,6 +37,7 @@ describe("resolveSegment", () => {
   it("most restrictive wins across checks", () => {
     const config: PluginConfig = {
       bashRules: [{ pattern: "*", action: "ask" }],
+      editRules: [],
       externalDirectoryRules: [{ pattern: "*", action: "deny" }],
       externalDirectoryDefault: null,
       enabled: true,
@@ -45,6 +49,7 @@ describe("resolveSegment", () => {
   it("no check triggers returns null", () => {
     const config: PluginConfig = {
       bashRules: [],
+      editRules: [],
       externalDirectoryRules: [],
       externalDirectoryDefault: null,
       enabled: true,
@@ -58,8 +63,8 @@ describe("resolveChain", () => {
   it("all segments allowed — chain let through", () => {
     const chain = resolveChain(
       [
-        { command: "git status", commandName: "git" },
-        { command: "git log", commandName: "git" },
+        { command: "git status", commandName: "git", redirects: [] },
+        { command: "git log", commandName: "git", redirects: [] },
       ],
       "/project",
       defaultConfig,
@@ -70,14 +75,15 @@ describe("resolveChain", () => {
   it("any segment not allowed — chain takes its action", () => {
     const config: PluginConfig = {
       bashRules: [{ pattern: "git *", action: "allow" }],
+      editRules: [],
       externalDirectoryRules: [],
       externalDirectoryDefault: null,
       enabled: true,
     };
     const chain = resolveChain(
       [
-        { command: "git status", commandName: "git" },
-        { command: "rm -rf /", commandName: "rm" },
+        { command: "git status", commandName: "git", redirects: [] },
+        { command: "rm -rf /", commandName: "rm", redirects: [] },
       ],
       "/project",
       config,
@@ -88,8 +94,8 @@ describe("resolveChain", () => {
   it("deny in any segment denies whole chain", () => {
     const chain = resolveChain(
       [
-        { command: "git status", commandName: "git" },
-        { command: "sudo rm -rf /", commandName: "sudo" },
+        { command: "git status", commandName: "git", redirects: [] },
+        { command: "sudo rm -rf /", commandName: "sudo", redirects: [] },
       ],
       "/project",
       defaultConfig,
@@ -99,7 +105,7 @@ describe("resolveChain", () => {
 
   it("single segment with no issues", () => {
     const chain = resolveChain(
-      [{ command: "git status", commandName: "git" }],
+      [{ command: "git status", commandName: "git", redirects: [] }],
       "/project",
       defaultConfig,
     );
@@ -156,6 +162,7 @@ describe("handlePermissionAsk", () => {
   it("does nothing for stored ask decisions", () => {
     const config: PluginConfig = {
       bashRules: [{ pattern: "*", action: "ask" }],
+      editRules: [],
       externalDirectoryRules: [],
       externalDirectoryDefault: null,
       enabled: true,
@@ -171,4 +178,108 @@ describe("handlePermissionAsk", () => {
     handlePermissionAsk({ callID: "nonexistent" }, output);
     expect(output.status).toBe("ask");
   });
+});
+
+describe("redirect enforcement", () => {
+  const cwd = "/project";
+
+  it("well-known fd redirect does not trigger edit check", () => {
+    const config: PluginConfig = {
+      bashRules: [{ pattern: "*", action: "allow" }],
+      editRules: [{ pattern: "*", action: "deny" }],
+      externalDirectoryRules: [],
+      externalDirectoryDefault: null,
+      enabled: true,
+    };
+    const action = resolveSegment("ls -la", "ls", cwd, config, [
+      { operator: ">&", target: "1", fileDescriptor: 2, wellKnown: true },
+    ]);
+    expect(action).toBe("allow");
+  });
+
+  it("/dev/null redirect does not trigger edit check", () => {
+    const config: PluginConfig = {
+      bashRules: [{ pattern: "*", action: "allow" }],
+      editRules: [{ pattern: "*", action: "deny" }],
+      externalDirectoryRules: [],
+      externalDirectoryDefault: null,
+      enabled: true,
+    };
+    const action = resolveSegment("ls -la", "ls", cwd, config, [
+      { operator: ">", target: "/dev/null", fileDescriptor: undefined, wellKnown: true },
+    ]);
+    expect(action).toBe("allow");
+  });
+
+  it("file redirect inside cwd checks only edit rules", () => {
+    const config: PluginConfig = {
+      bashRules: [{ pattern: "*", action: "allow" }],
+      editRules: [{ pattern: "/project/**", action: "allow" }],
+      externalDirectoryRules: [{ pattern: "*", action: "deny" }],
+      externalDirectoryDefault: null,
+      enabled: true,
+    };
+    const action = resolveSegment("ls", "ls", cwd, config, [
+      { operator: ">", target: "output.txt", fileDescriptor: undefined, wellKnown: false },
+    ]);
+    expect(action).toBe("allow");
+  });
+
+  it("file redirect outside cwd checks both edit and external_directory", () => {
+    const config: PluginConfig = {
+      bashRules: [{ pattern: "*", action: "allow" }],
+      editRules: [{ pattern: "/etc/**", action: "deny" }],
+      externalDirectoryRules: [{ pattern: "./**", action: "allow" }],
+      externalDirectoryDefault: "ask",
+      enabled: true,
+    };
+    const action = resolveSegment("echo hello", "echo", cwd, config, [
+      { operator: ">", target: "/etc/passwd", fileDescriptor: undefined, wellKnown: false },
+    ]);
+    expect(action).toBe("deny");
+  });
+
+  it("file redirect outside cwd with denied external_directory", () => {
+    const config: PluginConfig = {
+      bashRules: [{ pattern: "*", action: "allow" }],
+      editRules: [],
+      externalDirectoryRules: [],
+      externalDirectoryDefault: "deny",
+      enabled: true,
+    };
+    const action = resolveSegment("echo hello", "echo", cwd, config, [
+      { operator: ">", target: "/tmp/foo", fileDescriptor: undefined, wellKnown: false },
+    ]);
+    expect(action).toBe("deny");
+  });
+
+  it("redirect with ask edit rule produces ask", () => {
+    const config: PluginConfig = {
+      bashRules: [{ pattern: "*", action: "allow" }],
+      editRules: [{ pattern: "*", action: "ask" }],
+      externalDirectoryRules: [],
+      externalDirectoryDefault: null,
+      enabled: true,
+    };
+    const action = resolveSegment("ls", "ls", cwd, config, [
+      { operator: ">", target: "out.txt", fileDescriptor: undefined, wellKnown: false },
+    ]);
+    expect(action).toBe("ask");
+  });
+
+  it("redirect check combined with bash deny still denies", () => {
+    const config: PluginConfig = {
+      bashRules: [{ pattern: "*", action: "deny" }],
+      editRules: [{ pattern: "*", action: "allow" }],
+      externalDirectoryRules: [],
+      externalDirectoryDefault: null,
+      enabled: true,
+    };
+    const action = resolveSegment("sudo rm -rf /", "sudo rm -rf /", cwd, config, [
+      { operator: ">", target: "out.txt", fileDescriptor: undefined, wellKnown: false },
+    ]);
+    expect(action).toBe("deny");
+  });
+
+
 });

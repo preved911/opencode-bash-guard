@@ -1,15 +1,40 @@
 import { parse } from "unbash";
-import type { Script, Statement, Node, CommandExpansionPart, Command, AndOr, Pipeline } from "unbash";
+import type { Script, Statement, Node, CommandExpansionPart, Command, AndOr, Pipeline, Redirect } from "unbash";
+
+export interface RedirectInfo {
+  operator: string;
+  target: string;
+  fileDescriptor: number | undefined;
+  wellKnown: boolean;
+}
 
 export interface ChainSegment {
   command: string;
   commandName: string;
+  redirects: RedirectInfo[];
 }
 
 export interface ChainResult {
   segments: ChainSegment[];
   parseError: boolean;
   errors: string[];
+}
+
+function isWellKnownRedirect(redir: Redirect): boolean {
+  const target = redir.target?.text ?? redir.content ?? "";
+  if (target === "/dev/null") return true;
+  if (/^\d+$/.test(target)) return true;
+  if (redir.operator === "<<" || redir.operator === "<<-" || redir.operator === "<<<") return true;
+  return false;
+}
+
+function redirectToInfo(redir: Redirect): RedirectInfo {
+  return {
+    operator: redir.operator,
+    target: redir.target?.text ?? redir.content ?? "",
+    fileDescriptor: redir.fileDescriptor,
+    wellKnown: isWellKnownRedirect(redir),
+  };
 }
 
 function getCommandText(cmd: Command): string {
@@ -19,6 +44,12 @@ function getCommandText(cmd: Command): string {
   }
   for (const word of cmd.suffix) {
     parts.push(word.text);
+  }
+  for (const redir of cmd.redirects) {
+    const prefix = redir.fileDescriptor !== undefined ? String(redir.fileDescriptor) : "";
+    const op = redir.operator;
+    const target = redir.target?.text ?? "";
+    parts.push(`${prefix}${op}${target}`);
   }
   return parts.join(" ");
 }
@@ -50,16 +81,23 @@ function extractCommandsFromNode(node: Node): Command[] {
   return result;
 }
 
+function buildSegment(cmd: Command, stmtRedirects: Redirect[]): ChainSegment {
+  const cmdRedirects = (cmd.redirects ?? []).map(redirectToInfo);
+  const statementRedirects = (stmtRedirects ?? []).map(redirectToInfo);
+  return {
+    command: getCommandText(cmd),
+    commandName: getCommandName(cmd),
+    redirects: [...cmdRedirects, ...statementRedirects],
+  };
+}
+
 function extractCommandsFromScript(script: Script): ChainSegment[] {
   const segments: ChainSegment[] = [];
   for (const stmt of script.commands) {
     const cmds = extractCommandsFromNode(stmt.command);
     for (const cmd of cmds) {
       if (cmd.type === "Command") {
-        segments.push({
-          command: getCommandText(cmd),
-          commandName: getCommandName(cmd),
-        });
+        segments.push(buildSegment(cmd, stmt.redirects));
       }
     }
   }
