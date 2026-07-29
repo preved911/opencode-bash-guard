@@ -1,7 +1,7 @@
 import type { Plugin, Config, Hooks } from "@opencode-ai/plugin";
 import type { Permission } from "@opencode-ai/sdk";
 import { parseConfig } from "./config.js";
-import { beforeExecute, handlePermissionAsk } from "./enforce.js";
+import { beforeExecute, buildReadabilityMessage, handlePermissionAsk } from "./enforce.js";
 
 let pluginConfig: ReturnType<typeof parseConfig> | null = null;
 
@@ -30,10 +30,17 @@ const BashGuardPlugin: Plugin = async (input) => {
       if (result.shouldWrap && result.chainAction) {
         const originalCommand = toolOutput.args?.command || toolOutput.args?.args?.command;
         if (originalCommand && typeof originalCommand === "string") {
-          toolOutput.args = {
-            ...toolOutput.args,
-            command: `{ ${originalCommand}; }`,
-          };
+          if (result.readabilityReject) {
+            toolOutput.args = {
+              ...toolOutput.args,
+              command: buildReadabilityMessage(originalCommand),
+            };
+          } else {
+            toolOutput.args = {
+              ...toolOutput.args,
+              command: `{ ${originalCommand}; }`,
+            };
+          }
         }
       }
     },
