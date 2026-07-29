@@ -97,4 +97,52 @@ describe("parseChain", () => {
     expect(result.segments).toHaveLength(0);
     expect(result.parseError).toBe(false);
   });
+
+  it("captures fd redirect as well-known", () => {
+    const result = parseChain("ls -la 2>&1");
+    expect(result.segments).toHaveLength(1);
+    expect(result.segments[0].redirects).toHaveLength(1);
+    expect(result.segments[0].redirects[0].target).toBe("1");
+    expect(result.segments[0].redirects[0].wellKnown).toBe(true);
+    expect(result.segments[0].command).toContain("2>&1");
+  });
+
+  it("captures /dev/null redirect as well-known", () => {
+    const result = parseChain("ls -la > /dev/null");
+    expect(result.segments).toHaveLength(1);
+    expect(result.segments[0].redirects).toHaveLength(1);
+    expect(result.segments[0].redirects[0].target).toBe("/dev/null");
+    expect(result.segments[0].redirects[0].wellKnown).toBe(true);
+    expect(result.segments[0].command).toContain(">/dev/null");
+  });
+
+  it("captures file redirect as not well-known", () => {
+    const result = parseChain("ls -la > /tmp/out.txt");
+    expect(result.segments).toHaveLength(1);
+    expect(result.segments[0].redirects).toHaveLength(1);
+    expect(result.segments[0].redirects[0].target).toBe("/tmp/out.txt");
+    expect(result.segments[0].redirects[0].wellKnown).toBe(false);
+    expect(result.segments[0].command).toContain(">/tmp/out.txt");
+  });
+
+  it("captures heredoc as well-known", () => {
+    const result = parseChain("cat << EOF");
+    expect(result.segments).toHaveLength(1);
+    expect(result.segments[0].redirects).toHaveLength(1);
+    expect(result.segments[0].redirects[0].wellKnown).toBe(true);
+  });
+
+  it("captures redirect in chain", () => {
+    const result = parseChain("echo hello > file.txt && cat file.txt");
+    expect(result.segments).toHaveLength(2);
+    expect(result.segments[0].redirects).toHaveLength(1);
+    expect(result.segments[0].redirects[0].target).toBe("file.txt");
+    expect(result.segments[0].redirects[0].wellKnown).toBe(false);
+    expect(result.segments[1].redirects).toHaveLength(0);
+  });
+
+  it("includes redirect in command text", () => {
+    const result = parseChain("echo test 2>/dev/null");
+    expect(result.segments[0].command).toBe("echo test 2>/dev/null");
+  });
 });

@@ -12,6 +12,7 @@ export interface ExternalDirectoryRule {
 
 export interface PluginConfig {
   bashRules: BashPermissionRule[];
+  editRules: BashPermissionRule[];
   externalDirectoryRules: ExternalDirectoryRule[];
   externalDirectoryDefault: ExternalDirectoryAction | null;
   enabled: boolean;
@@ -25,6 +26,7 @@ export function parseConfig(config: Record<string, unknown>): PluginConfig {
   const permission = config.permission as Record<string, unknown> | undefined;
 
   let bashRules: BashPermissionRule[] = [];
+  let editRules: BashPermissionRule[] = [];
   let externalDirectoryRules: ExternalDirectoryRule[] = [];
   let externalDirectoryDefault: ExternalDirectoryAction | null = null;
   let enabled = true;
@@ -35,6 +37,18 @@ export function parseConfig(config: Record<string, unknown>): PluginConfig {
       bashRules = [{ pattern: "*", action: bash }];
     } else if (bash && typeof bash === "object") {
       bashRules = Object.entries(bash)
+        .filter((entry): entry is [string, unknown] => true)
+        .map(([pattern, action]) => ({
+          pattern,
+          action: (isPermissionAction(String(action)) ? String(action) : "ask") as "ask" | "allow" | "deny",
+        }));
+    }
+
+    const edit = permission.edit;
+    if (typeof edit === "string" && isPermissionAction(edit)) {
+      editRules = [{ pattern: "*", action: edit }];
+    } else if (edit && typeof edit === "object") {
+      editRules = Object.entries(edit)
         .filter((entry): entry is [string, unknown] => true)
         .map(([pattern, action]) => ({
           pattern,
@@ -63,7 +77,7 @@ export function parseConfig(config: Record<string, unknown>): PluginConfig {
     enabled = false;
   }
 
-  return { bashRules, externalDirectoryRules, externalDirectoryDefault, enabled };
+  return { bashRules, editRules, externalDirectoryRules, externalDirectoryDefault, enabled };
 }
 
 export function matchBashPermission(segment: string, rules: BashPermissionRule[]): "ask" | "allow" | "deny" | null {
