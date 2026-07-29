@@ -8,6 +8,7 @@ export interface ChainSegment {
 
 export interface ChainResult {
   segments: ChainSegment[];
+  topLevelSegments: ChainSegment[];
   parseError: boolean;
   errors: string[];
 }
@@ -122,7 +123,7 @@ function parseMetaCommandArgs(command: string): string | null {
 
 export function parseChain(command: string): ChainResult {
   if (!command || command.trim().length === 0) {
-    return { segments: [], parseError: false, errors: [] };
+    return { segments: [], topLevelSegments: [], parseError: false, errors: [] };
   }
 
   const result = parse(command);
@@ -136,7 +137,8 @@ export function parseChain(command: string): ChainResult {
     }
   }
 
-  const segments = extractCommandsFromScript(result);
+  const topLevelSegments = extractCommandsFromScript(result);
+  const segments = [...topLevelSegments];
 
   const nestedCmds = extractNestedCommands(result);
   segments.push(...nestedCmds);
@@ -158,5 +160,5 @@ export function parseChain(command: string): ChainResult {
     }
   }
 
-  return { segments, parseError, errors };
+  return { segments, topLevelSegments, parseError, errors };
 }

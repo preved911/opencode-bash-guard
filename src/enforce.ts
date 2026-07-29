@@ -63,40 +63,81 @@ export function resolveChain(segments: Array<{ command: string; commandName: str
   return null;
 }
 
+export interface BeforeExecuteResult {
+  shouldWrap: boolean;
+  chainAction: ChainAction;
+  readabilityReject: boolean;
+}
+
+/**
+ * Check whether a command has multiple top-level chain segments (pipes, &&, ||, ;)
+ * that would benefit from formatting with newlines and comments, but exclude
+ * single-command invocations that merely contain nested substitutions.
+ */
+export function isComplexChain(command: string): boolean {
+  const chain = parseChain(command);
+  return chain.topLevelSegments.length > 1;
+}
+
+/** Build a replacement command that prints a readability-formatting error. */
+export function buildReadabilityMessage(command: string): string {
+  return `cat <<'OPENGUARD'
+\u2716 Command rejected: contains multiple chained operations.
+
+The agent must rewrite this command using line breaks and comments for readability:
+
+  # Step 1: describe what this does
+  first-command
+  # Step 2: describe what this does
+  second-command
+
+Original command was:
+
+  ${command}
+OPENGUARD
+exit 1`;
+}
+
 export function beforeExecute(
   tool: string,
   callID: string,
   cwd: string,
   args: any,
   config: PluginConfig,
-): { shouldWrap: boolean; chainAction: ChainAction } {
+): BeforeExecuteResult {
   if (tool.toLowerCase() !== "bash") {
-    return { shouldWrap: false, chainAction: null };
+    return { shouldWrap: false, chainAction: null, readabilityReject: false };
   }
 
   const command: string | undefined = args?.command;
   if (!command || command.trim().length === 0) {
-    return { shouldWrap: false, chainAction: null };
+    return { shouldWrap: false, chainAction: null, readabilityReject: false };
   }
 
   const chain = parseChain(command);
   if (chain.parseError || chain.segments.length === 0) {
     decisionStore.set(callID, { action: "deny" });
-    return { shouldWrap: true, chainAction: "deny" };
+    return { shouldWrap: true, chainAction: "deny", readabilityReject: false };
   }
 
   const action = resolveChain(chain.segments, cwd, config);
 
   if (action === null || action === "allow") {
-    return { shouldWrap: false, chainAction: action };
+    return { shouldWrap: false, chainAction: action, readabilityReject: false };
+  }
+
+  // Complex chain requiring approval → reject with readability instruction
+  if (action === "ask" && chain.topLevelSegments.length > 1) {
+    decisionStore.set(callID, { action: "deny" });
+    return { shouldWrap: true, chainAction: "deny", readabilityReject: true };
   }
 
   if (action === "deny" || action === "ask") {
     decisionStore.set(callID, { action });
-    return { shouldWrap: true, chainAction: action };
+    return { shouldWrap: true, chainAction: action, readabilityReject: false };
   }
 
-  return { shouldWrap: false, chainAction: null };
+  return { shouldWrap: false, chainAction: null, readabilityReject: false };
 }
 
 export function handlePermissionAsk(input: { callID?: string }, output: { status: "ask" | "deny" | "allow" }): void {

