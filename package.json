@@ -1,6 +1,6 @@
 {
   "name": "opencode-bash-guard",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "An opencode plugin that parses chained bash commands into segments and checks each against existing permission.bash and external_directory config",
   "type": "module",
   "main": "dist/index.js",
