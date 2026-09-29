@@ -27,6 +27,7 @@ API facts verified against `@opencode-ai/plugin@1.18.6` types and the opencode m
 - Not adding length-based or token-based metrics — segment count and nesting depth cover the unreadable-mess cases
 - Not adding retry counters or rate limits for repeated violations
 - Not hot-reloading the config file — changes require an opencode restart (same as the existing config hook)
+- **No learned/external classifier (Jev) in v1** — detection stays deterministic; the TypeSafe Jev backend is deferred and tracked in #22
 
 ## Decisions
 
@@ -129,7 +130,7 @@ API facts verified against `@opencode-ai/plugin@1.18.6` types and the opencode m
 ## Future Directions (discussed in review, not in v1 scope)
 
 - **Plugin-injected instructions (no manual AGENTS.md step).** Today the AGENTS.md snippet (decision 7) is a manual soft layer. A follow-up change should investigate injecting the "one command per line" guidance from the plugin itself — zero user steps — if the opencode plugin API exposes a workable system-prompt/instructions hook. This only reduces rejection frequency; the deterministic rejection path does not depend on it.
-- **Learned complexity/risk classification (TypeSafe "Jev").** The AST-threshold approach (`max_segments`, `max_depth`, statement counts) is deterministic but brittle at the margins — "is this command readable?" is a fuzzy judgment that hand-written thresholds approximate. A System One-style structured-output classifier (typesafe.ai Jev: typed decisions with calibrated probabilities, fast and cheap, schema outputs that cannot hallucinate types) could score commands where thresholds disagree with intuition. Viable only as an optional, off-by-default detector backend (e.g. `"detector": "ast" | "jev"`): the deterministic path stays the source of truth and the fallback when the service is unavailable; the privacy implication of commands leaving the machine must be documented; adoption gated on early-access availability.
+- **Learned complexity/risk classification (TypeSafe "Jev") — decided: NOT in v1.** The AST-threshold approach (`max_segments`, `max_depth`, statement counts) is deterministic but brittle at the margins — "is this command readable?" is a fuzzy judgment that hand-written thresholds approximate. A System One-style structured-output classifier (typesafe.ai Jev: typed decisions with calibrated probabilities, fast and cheap, schema outputs that cannot hallucinate types) could score commands where thresholds disagree with intuition. Explicitly deferred: v1 ships the deterministic detector only, with no external dependency, no privacy surface, and no availability coupling on a security path. When pursued, it is an optional, off-by-default detector backend (`"detector": "ast" | "jev"`): the deterministic path stays the source of truth and the fallback when the service is unavailable; the privacy implication of commands leaving the machine must be documented; adoption gated on early-access availability. Full design + tasks tracked in **#22**.
 
 ## Risks / Trade-offs
 
