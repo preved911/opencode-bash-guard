@@ -1,126 +1,141 @@
 ## ADDED Requirements
 
-### Requirement: Parse bash_args rules from config
+### Requirement: Parse permissions rules from the plugin config file
 
-The system SHALL parse an optional `permission.bash_args` array from the merged opencode config into typed rules `{ pattern: string, action: "ask" | "allow" | "deny" }`, preserving declaration order. Entries with a missing/empty pattern or an invalid action SHALL be dropped with a warning. When the section is absent, the parsed rule list SHALL be empty and plugin behavior SHALL be identical to before this change.
+The system SHALL read an optional `permissions` array from the plugin config file `opencode-bash-guard.jsonc` (project `.opencode/` and global opencode config dir, project wins) into typed tool entries `{ tool: string, args: ArgMatcher[] }`. Each arg matcher SHALL declare exactly one of `token: string` or `position: number` + `pattern: string`, MAY declare `valuePattern: string` (with `token`) or nested `args` (with `token`), and MUST declare `action: "allow" | "ask" | "deny"`. Entries failing validation SHALL be dropped with a warning naming them. When the file or section is absent, or the file fails to parse, the parsed rule list SHALL be empty and plugin behavior SHALL be identical to before this change.
 
-#### Scenario: Valid rules parse in order
+#### Scenario: Valid entries parse
 
-- **WHEN** `permission.bash_args` is `[{"pattern": "curl -X GET *", "action": "allow"}, {"pattern": "curl *", "action": "ask"}]`
-- **THEN** two rules are stored in declaration order with those actions
+- **WHEN** `permissions` contains `{ "tool": "find", "args": [{ "token": "-delete", "action": "ask" }, { "position": 0, "pattern": "/Users/me/work/**", "action": "allow" }] }`
+- **THEN** one tool entry is stored with two validated arg matchers
 
-#### Scenario: Invalid entries dropped
+#### Scenario: Invalid entries dropped with warning
 
-- **WHEN** `permission.bash_args` contains `{"pattern": "", "action": "allow"}` and `{"pattern": "find *", "action": "block"}`
-- **THEN** both entries are dropped and a warning names each dropped entry
+- **WHEN** `permissions` contains an entry without `tool`, a matcher with both `token` and `position`, a matcher without `action`, and one with `action: "block"`
+- **THEN** each invalid entry is dropped and a warning names it
 
 #### Scenario: Section absent
 
-- **WHEN** `permission.bash_args` is not present in the config
+- **WHEN** `opencode-bash-guard.jsonc` does not exist or has no `permissions` section
 - **THEN** the args rule list is empty and no behavior changes vs. the previous release
 
-### Requirement: Token-based pattern matching with wildcard support
+#### Scenario: Invalid config file disables the feature
 
-The system SHALL match a segment against an args-rule pattern by whitespace tokenization. A literal pattern token SHALL equal the segment token at the same position (case-sensitive); a `*` pattern token SHALL match any run of zero or more segment tokens. Matching SHALL be anchored at the first token (the command name) and require full consumption of pattern tokens.
+- **WHEN** `opencode-bash-guard.jsonc` contains a JSONC syntax error
+- **THEN** a warning names the parse error and `permissions` is treated as absent; the plugin's glob-based behavior is unaffected
 
-#### Scenario: Exact flag sequence
+### Requirement: Structured arg matcher semantics
 
-- **WHEN** pattern is `curl -X GET *` and segment is `curl -X GET https://api.com/data`
-- **THEN** the pattern matches
+The system SHALL match a segment's tokens (after the command name, whitespace-tokenized, case-sensitive) against arg matchers independently: a `token` matcher matches any unconsumed equal token and consumes it; with `valuePattern`, the next token must exist and glob-match it; a `position`+`pattern` matcher matches the token at that 0-based index against the glob; nested `args` SHALL be evaluated only on the remaining tokens after the parent `token` matcher matched, with tokens consumed at deeper levels invisible to shallower matchers. Every matched matcher SHALL contribute its action; no matcher short-circuits another.
 
-#### Scenario: Wildcard between literals
+#### Scenario: Flag token matches anywhere
 
-- **WHEN** pattern is `find * -delete` and segment is `find /tmp -name "*.log" -delete`
-- **THEN** the pattern matches (`*` spans `/tmp -name "*.log"`)
+- **WHEN** matcher is `{ "token": "-delete", "action": "ask" }` and segment is `find /tmp -name "*.log" -delete`
+- **THEN** the matcher matches and contributes `ask`
 
 #### Scenario: Flag not present — no match
 
-- **WHEN** pattern is `find * -delete` and segment is `find /tmp -name "*.log"`
-- **THEN** the pattern does not match
+- **WHEN** matcher is `{ "token": "-delete", "action": "ask" }` and segment is `find /tmp -name "*.log"`
+- **THEN** the matcher does not match
 
-#### Scenario: Trailing wildcard matches zero tokens
+#### Scenario: Positional pattern match
 
-- **WHEN** pattern is `curl -X GET *` and segment is `curl -X GET`
-- **THEN** the pattern matches
+- **WHEN** matcher is `{ "position": 0, "pattern": "/Users/me/work/**", "action": "allow" }` and segment is `find /Users/me/work/logs -type f`
+- **THEN** the matcher matches (token at position 0 is `/Users/me/work/logs`)
 
-#### Scenario: Command name must match
+#### Scenario: Positional pattern mismatch
 
-- **WHEN** pattern is `git push --force *` and segment is `hg push --force`
-- **THEN** the pattern does not match
+- **WHEN** matcher is `{ "position": 0, "pattern": "/Users/me/work/**", "action": "allow" }` and segment is `find /tmp -type f`
+- **THEN** the matcher does not match
 
-#### Scenario: Case-sensitive tokens
+#### Scenario: Flag value pattern
 
-- **WHEN** pattern is `curl -X GET *` and segment is `curl -X get https://api.com`
-- **THEN** the pattern does not match
+- **WHEN** matcher is `{ "token": "-X", "valuePattern": "GET", "action": "allow" }` and segment is `curl -X GET https://api.com`
+- **THEN** the matcher matches; for `curl -X POST https://api.com` it does not
 
-#### Scenario: Adjacent flag value required
+#### Scenario: Nested subcommand rules
 
-- **WHEN** pattern is `curl -X GET *` and segment is `curl -X POST https://api.com`
-- **THEN** the pattern does not match (`-X` must be followed by `GET`)
+- **WHEN** tool entry is `git` with `{ "token": "push", "action": "allow", "args": [{ "token": "--force", "action": "deny" }] }` and segment is `git push --force origin main`
+- **THEN** `push` matches and contributes `allow`, the nested `--force` matches and contributes `deny`
 
-#### Scenario: Extra whitespace normalizes
+#### Scenario: Nested rules require the parent token
 
-- **WHEN** pattern is `curl -X GET *` and segment is `curl   -X   GET   https://api.com`
-- **THEN** the pattern matches
+- **WHEN** same config and segment is `git status` or `git commit --force-ish`
+- **THEN** no nested matcher is evaluated; `push` and `--force` do not match
 
-### Requirement: Args rules take precedence over glob rules, first match wins
+#### Scenario: Consumed tokens are not rematched
 
-For each segment, the bash action SHALL be resolved as: first matching `bash_args` rule in declaration order → its action; otherwise existing `permission.bash` glob matching → its action; otherwise no opinion. A narrower args rule declared before a broader one SHALL override it regardless of the glob rules.
+- **WHEN** segment is `git push --force` and entry declares both an outer `{ "token": "--force", "action": "ask" }` and the nested `push` → `{ "token": "--force", "action": "deny" }` tree
+- **THEN** `--force` is matched once (nested, `deny`); the outer matcher does not match it again
 
-#### Scenario: Narrow allow beats broad ask
+### Requirement: Most-restrictive-wins among matched args rules
 
-- **WHEN** `bash_args` is `[{"pattern": "curl -X GET *", "action": "allow"}, {"pattern": "curl *", "action": "ask"}]` and segment is `curl -X GET https://api.com`
-- **THEN** the segment's bash action is `allow`
+When one or more arg matchers match a segment, the segment's args-level action SHALL be the most restrictive among all contributed actions (`deny` > `ask` > `allow`), regardless of declaration order. If no matcher matches, the segment SHALL have no args-level opinion.
 
-#### Scenario: Broad rule catches the rest
+#### Scenario: Ask wins over allow
 
-- **WHEN** same config and segment is `curl -X POST https://api.com` (no `-X GET` rule match, `curl *` matches)
-- **THEN** the segment's bash action is `ask`
+- **WHEN** segment `find /Users/me/work/logs -delete` matches both `-delete → ask` and position-0 `allow` matchers
+- **THEN** the args-level action is `ask`
 
-#### Scenario: Fallback to glob rules
+#### Scenario: Deny wins over ask
 
-- **WHEN** no args rule matches segment `git status` and `permission.bash` has `"git *": "allow"`
-- **THEN** the segment's bash action is `allow` via glob matching
+- **WHEN** segment `git push --force-with-lease` matches a nested `--force-with-lease → allow` and a sibling `--force* → deny` matcher
+- **THEN** the args-level action is `deny`
 
-#### Scenario: No args rule, no glob rule
+#### Scenario: Single match decides
 
-- **WHEN** segment `wget evil.sh` matches neither args nor glob rules
-- **THEN** the segment has no bash opinion (existing behavior)
+- **WHEN** segment `find /Users/me/work/logs -type f` matches only the position-0 `allow` matcher
+- **THEN** the args-level action is `allow`
 
-### Requirement: Flag-level allow overrides native ask
+#### Scenario: No match — no opinion
 
-When a chain's aggregated action is `allow` and at least one segment's allow came from a matching args rule, the plugin SHALL store the `allow` decision for the callID without wrapping the command, and `permission.ask` SHALL set `output.status = "allow"` if opencode still prompts. Chains whose allows come only from glob rules SHALL keep today's no-intervention behavior.
+- **WHEN** segment `find /tmp -type f` matches no matcher of the `find` entry
+- **THEN** the segment has no args-level opinion
 
-#### Scenario: Native ask suppressed for flag allow
+### Requirement: Check pipeline — args level, then permission block level, then native checks
 
-- **WHEN** segment `curl -X GET https://api.com` matches args rule `allow`, native `permission.bash` has `"curl *": "ask"` so opencode prompts
-- **THEN** the plugin stores `allow` for the callID and `permission.ask` sets `output.status = "allow"` — command runs without user interaction
+For each segment, the bash action SHALL be resolved as: args-level action when any args matcher matched; otherwise the existing `permission.bash` glob evaluation (unchanged, including last-match-wins); otherwise no opinion and native opencode permission checks apply. The old glob-based behavior SHALL be preserved for every segment no args rule matches.
+
+#### Scenario: Args allow overrides a broad native ask
+
+- **WHEN** `permissions` has `curl` → `{ "token": "-X", "valuePattern": "GET", "action": "allow" }`, native `permission.bash` has `"*": "ask"`, and segment is `curl -X GET https://api.com`
+- **THEN** the segment's action is `allow` from the args level, stored for the callID, and `permission.ask` sets `output.status = "allow"` — the command runs without a prompt
+
+#### Scenario: Unmatched segment falls through to glob level
+
+- **WHEN** same config and segment is `curl -X POST https://api.com` (no args match)
+- **THEN** the segment's action comes from the native glob evaluation — `ask`, dialog shown
+
+#### Scenario: Segment matching no rule at either level
+
+- **WHEN** segment `wget evil.sh` matches neither args rules nor any glob pattern except `"*": "ask"`
+- **THEN** the segment's action is `ask` via the glob level (existing behavior)
 
 #### Scenario: Glob-only allow unchanged
 
-- **WHEN** segment `git status` is allowed only via glob `"git *": "allow"` and native opencode also allows it
+- **WHEN** segment `git status` is allowed via glob `"git *": "allow"` and matches no args rule
 - **THEN** the plugin stores nothing and does not intervene
 
-#### Scenario: Flag ask still prompts via native dialog
+#### Scenario: Args ask prompts, args deny blocks
 
-- **WHEN** segment `find /tmp -delete` matches args rule `ask`
-- **THEN** the command is wrapped, `ask` stored, and the user sees the native opencode prompt
-
-#### Scenario: Flag deny blocks
-
-- **WHEN** segment `git push --force origin main` matches args rule `deny` declared before any broader allow
-- **THEN** the chain action is `deny` and the command is blocked
+- **WHEN** segment `find /tmp -name "*.log" -delete` resolves to args `ask`, and segment `git push --force origin main` resolves to args `deny`
+- **THEN** the first wraps and shows the native dialog; the second is blocked
 
 ### Requirement: Chain aggregation includes args-rule actions
 
-Args-rule actions SHALL participate in existing segment resolution and most-restrictive-wins chain aggregation (deny > ask > allow) with no new aggregation rules.
+Args-level actions SHALL participate in existing segment resolution and most-restrictive-wins chain aggregation (deny > ask > allow) with no new aggregation rules. A chain whose aggregated action is `allow` and where at least one segment's allow came from an args rule SHALL store the `allow` decision and enforce it in `permission.ask`; chains whose allows come only from glob rules SHALL keep today's no-intervention behavior.
 
 #### Scenario: Mixed chain aggregates most restrictive
 
 - **WHEN** chain is `git status && find /tmp -delete` where `git status` → allow (glob) and `find /tmp -delete` → ask (args rule)
 - **THEN** the chain action is `ask`
 
-#### Scenario: All-allow flag chain force-allows
+#### Scenario: All-allow args chain force-allows
 
-- **WHEN** chain is `curl -X GET https://a.com && curl -X GET https://b.com` and both segments match the args `allow` rule, native matching would ask
+- **WHEN** chain is `curl -X GET https://a.com && curl -X GET https://b.com` and both segments match the args `allow` matcher while native matching would ask
 - **THEN** the chain action is `allow`, stored, and enforced as `allow` in `permission.ask`
+
+#### Scenario: One ask segment asks the chain
+
+- **WHEN** chain is `curl -X GET https://a.com && curl -X POST https://b.com` (second segment falls through to native `"*": "ask"`)
+- **THEN** the chain action is `ask`

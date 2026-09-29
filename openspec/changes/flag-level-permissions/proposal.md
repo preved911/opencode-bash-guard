@@ -1,20 +1,31 @@
 ## Why
 
-`permission.bash` glob patterns match against the whole command string, so they cannot express flag-level intent. A user who wants `curl -X GET` allowed but every other `curl` invocation asked must resort to fragile full-string patterns — and ordering/overlap between broad and narrow patterns is undefined behavior territory (`"curl *": "ask"` catches `curl -X GET https://api.com` even when a narrower `"curl -X GET *": "allow"` exists elsewhere). Dangerous flags like `find ... -delete`, `git push --force`, or `rm -rf` deserve their own actions independent of the command's general permission. The plugin already splits commands into segments; it is the right place to evaluate segments against arg/flag-aware rules.
+opencode's `permission.bash` globs match against the whole command string, so they cannot express flag-level intent. A user who wants `curl -X GET` allowed but every other `curl` invocation asked must resort to fragile full-string patterns, and dangerous flags like `find ... -delete`, `git push --force`, or `rm -rf` deserve their own actions independent of the command's general permission. The plugin already splits chains into segments; it is the right place to evaluate segments against arg/flag-aware rules.
+
+Because these rules are bash-guard's own vocabulary — structured per-tool arg matching that opencode's permission block cannot express — they belong in the **plugin's own config** (`opencode-bash-guard.jsonc`), not in opencode's config. The existing check pipeline is preserved:
+
+1. **bash-guard config level** — arg/flag rules decide the segment when they match
+2. **opencode's permission block level, evaluated by bash-guard** — existing `permission.bash` glob checks apply when no arg rule matched
+3. **opencode's permission checks** — the native prompt/dialog still fires when required
 
 ## What Changes
 
-- **New config section `permission.bash_args`** — ordered array of rules `{ "pattern": "curl -X GET *", "action": "allow" }` matching a segment's command name and arguments as whitespace tokens
-- **Token-based pattern matching** — `*` in a pattern matches any run of zero or more argument tokens (`curl -X GET *`, `find * -delete`); matching is anchored at the first token (the command name)
-- **First-match-wins precedence** — rules are evaluated in declared array order; the first matching rule decides the segment's bash action. Specific rules before broad rules is the documented convention
-- **Args rules take precedence over glob rules** — a segment is checked against `bash_args` first; if no args rule matches, existing `permission.bash` glob matching applies unchanged
-- **Force-allow for flag rules** — when an args rule matches with `allow`, the plugin stores the decision and overrides a native opencode `ask` via `permission.ask` (`status = "allow"`), making `curl -X GET *` → allow genuinely effective even when the native fallback is `"curl *": "ask"`. Glob-only allows keep today's behavior (no intervention)
-- **Chain integration** — args-rule actions participate in existing segment resolution and most-restrictive-wins chain aggregation; `deny`/`ask` still wrap and store as today
+- **New plugin config section `permissions`** in `opencode-bash-guard.jsonc` — an array of per-tool entries `{ "tool": "find", "args": [...] }`, one entry per command whose flags need their own policy
+- **Structured arg matchers** (replaces whole-string patterns):
+  - `token` — exact arg token match, for flags (`-delete`) and subcommands (`push`)
+  - `position` + `pattern` — positional token with a value glob (e.g. first path argument under `/Users/me/work/*`)
+  - `valuePattern` — glob against the value that follows a matched flag (`-name "*.log"`)
+  - `action` — `"allow" | "ask" | "deny"` per matcher
+- **Most-restrictive-wins** — all arg matchers a segment matches contribute their actions; the most restrictive one decides (deny > ask > allow). Declaration order is irrelevant; no shadowing
+- **Nested permission declarations** — an arg matcher that matches a subcommand token can declare nested `args` for the remaining tokens (`git push --force` → `push` allows, nested `--force` denies)
+- **Check pipeline** — args rules first; unmatched segments fall through to the existing `permission.bash` glob evaluation unchanged; `ask` still reaches the native opencode dialog
+- **Args-level allow overrides a native ask** — stored decision + `permission.ask` (`status = "allow"`), so `curl -X GET * → allow` genuinely works over a native `"curl *": "ask"` fallback
+- **Zero behavior change** when the `permissions` section is absent
 
 ## Capabilities
 
 ### New Capabilities
-- `args-permission-matching`: Parse `permission.bash_args` rules, match segments by command + argument tokens with wildcard support, resolve precedence, and enforce flag-level allow/ask/deny decisions
+- `args-permission-matching`: Read the plugin config file, parse `permissions` tool entries, match segments by structured arg matchers (token / position+pattern / valuePattern, with nesting), resolve most-restrictive-wins, and enforce flag-level allow/ask/deny decisions ahead of the existing glob checks
 
 ### Modified Capabilities
 
@@ -22,7 +33,7 @@ None (the base `opencode-bash-guard` change is not yet archived; behavioral exte
 
 ## Impact
 
-- Config: optional new `permission.bash_args` array in `opencode.json` — absent section means zero behavior change
-- Code: `src/config.ts` (new rule type, parsing, token matcher), `src/enforce.ts` (resolution order, stored allow decisions), `src/index.ts` (permission.ask may set `status = "allow"`)
-- Docs: README section with rule examples and ordering guidance
-- No new dependencies
+- Config: optional new `permissions` array in `opencode-bash-guard.jsonc` (plugin-owned file; absent file/section means zero behavior change)
+- Code: config file reader (JSONC via `jsonc-parser` — new dependency), `src/config.ts` (rule schema, validation, matcher engine), `src/enforce.ts` (resolution order, stored allow decisions), `src/index.ts` (`permission.ask` may set `status = "allow"`)
+- Docs: README section describing the two-level permission model with examples
+- No changes to opencode's config format; `permission.bash` and `external_directory` keep working exactly as today
