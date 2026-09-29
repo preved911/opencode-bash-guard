@@ -13,19 +13,22 @@
 - [ ] 2.1 Extend `parseChain` to report max substitution nesting depth: track depth while recursively walking `$()`, backticks, and meta-command string args
 - [ ] 2.2 Return shape: `{ segments, maxDepth, parseError }` (or parallel accessor) — keep existing call sites compiling
 - [ ] 2.3 Unit tests: flat chain depth 0/1, single-level `$()`, triple nesting, `bash -c "..."` depth accounting
+- [ ] 2.4 Per-line segmentation helper: split command into lines, parse each line into segments (returns per-line counts + worst offending line)
+- [ ] 2.5 Interpreter inline-script detection: `python`/`python3 -c`, `perl -e`, `node -e`/`--eval`, `ruby -e`, `php -r`, heredoc-scripted interpreters — extract script string, count statements (`;`/newline split); unit tests: short script passes, `;`-split count, newline-split count, non-interpreter command unaffected
 
 ## 3. Enforcement (`src/enforce.ts`)
 
-- [ ] 3.1 Export rejection-message builder with actual counts: `[opencode-bash-guard] Complex one-liner rejected (N chained commands, nesting depth D). Re-issue as separate bash tool calls, or as a multi-line script with one command per line — each command is then permission-checked individually.`
-- [ ] 3.2 Implement complexity check: single-line command (no newline) → segments > maxSegments; any command → maxDepth > maxDepthLimit; multi-line exempt from segment check
+- [ ] 3.1 Export rejection-message builder with actual counts: single-line → `[opencode-bash-guard] Complex one-liner rejected (N chained commands, nesting depth D). Re-issue as separate bash tool calls, or as a multi-line script with one command per line — each command is then permission-checked individually.`; multi-line → worst offending line (`line K: N chained commands`); interpreter inline script → interpreter name + statement count with one-statement-per-line / move-to-file guidance
+- [ ] 3.2 Implement complexity check: every line of the command → line segments > maxSegments (single-line = one line); whole command → maxDepth > maxDepthLimit; inline-script statement count > maxSegments counts as exceeded
 - [ ] 3.3 In `beforeExecute`: after `resolveChain`, throw the guidance Error ONLY when action is `ask` AND `restructure.enabled` AND limits exceeded; `allow`/`deny`/`null`/parse-error flows verbatim
-- [ ] 3.4 Unit tests: allowed complex chain passes (no throw); complex ask chain throws (message contains counts + instruction); deny/ask-disabled/null/parse-error unchanged; repeated violation re-throws; boundaries (N == max passes, N+1 throws; multi-line with many lines passes segment check)
+- [ ] 3.4 Unit tests: allowed complex chain passes (no throw); complex ask chain throws (message contains counts + instruction); multi-line one-command-per-line passes; 2-line script of 5-segment `&&` chains throws naming the line; inline `python3 -c` with 5 statements throws; pretty inline script passes; deny/ask-disabled/null/parse-error unchanged; repeated violation re-throws; boundaries (N == max passes, N+1 throws)
 
 ## 4. Integration Tests
 
 - [ ] 4.1 Multi-line re-issue: 4-line script parses into 4 segments, each checked independently
 - [ ] 4.2 Separate-calls re-issue: single-segment commands evaluate normally
 - [ ] 4.3 Config matrix: disabled → zero throws across all commands; enabled with defaults; enabled with custom thresholds
+- [ ] 4.4 Multi-line per-line chains: 2-line script of long `&&` chains on an ask-resolving chain → rejected with line-scoped message
 
 ## 5. Documentation
 
@@ -38,7 +41,7 @@
   - Never write chained one-liners (`a && b && c`). If rejected, split and retry.
   ```
 
-- [ ] 5.3 README known limitations: config read once at startup (restart to apply); multi-line scripts with long per-line `&&`-chains pass the segment check (v1 edge); no retry counter; note on `permission.ask` reliability (issue anomalyco/opencode#19469) pending separate verification
+- [ ] 5.3 README known limitations: config read once at startup (restart to apply); heuristic inline-script statement counting (strings containing `;` can miscount; errs toward rejection); no retry counter; note on `permission.ask` reliability (issue anomalyco/opencode#19469) pending separate verification
 
 ## 6. Verification
 

@@ -63,19 +63,20 @@ API facts verified against `@opencode-ai/plugin@1.18.6` types and the opencode m
    - `deny` → existing deny flow (wrap + stored deny). Restructuring a forbidden action is meaningless — the format is not the problem.
    - Parse errors → existing fail-closed deny, unaffected.
    - `null` (no plugin opinion) → untouched. Under the documented prerequisite (`"*": "ask"`), every uncovered segment matches the catch-all, so any chain that would reach a human resolves to `ask` — "not allowed" ⇔ `ask` in practice. Without the catch-all the plugin has no opinion and does not intervene.
+   - **Default permission settings are accounted for by the existing self-disable logic** (`parseConfig` in `src/config.ts`): the entire plugin disables itself when `permission.bash` is absent (opencode's default state — no user permission config) or resolves to `allow` (flat `"bash": "allow"` or object `"*": "allow"`), so under defaults neither the chain guard nor `restructure` runs — no surprising prompts for users who never opted in. `restructure` can therefore only fire in a configuration where the user has set up bash permissions, and the `"*": "ask"` catch-all (documented prerequisite) is exactly the configuration where "not allowed ⇔ ask" holds.
 
    Flow in `beforeExecute`: parse → resolve chain (existing) → if action is `ask` AND `restructure.enabled` AND limits exceeded → **throw** (replaces wrap+store for that call). Otherwise existing flows verbatim.
 
-4. **One-liner targeting: segment limit applies to single-line commands only**
+4. **Segment limit applies per line, to every command shape**
 
-   - Command contains no newline → both `max_segments` and `max_depth` checks apply.
-   - Command contains a newline (multi-line script) → **exempt from the segment limit**; depth check still applies.
+   - Command contains no newline → the whole command is one line: both `max_segments` and `max_depth` checks apply.
+   - Command contains a newline (multi-line script) → **each line is checked against `max_segments` individually**; `max_depth` still applies to the whole command.
 
-   Rationale: the compliant form ("multi-line, one command per line") must never violate the segment limit, otherwise the retry loop can deadlock (a 5-step task re-issued as 5 lines would still exceed `max_segments: 3` and be rejected forever). Multi-line IS the readable form the feature asks for. Deep nesting remains unreadable in any shape, so `max_depth` applies to both forms. Known edge, accepted for v1: a multi-line script with long `&&`-chains inside individual lines passes the segment check (ask still gates uncovered segments; a per-line segment check is possible future refinement).
+   Review decision (recorded): multi-line is NOT a blanket exemption. A "multi-line" script whose lines are long `&&`/`||` chains is exactly as unreadable as a one-liner, and chains re-wrapped across a few lines are a frequent real shape — the segment limit must see them. Checking per line keeps the retry loop deadlock-free: the compliant form (one command per line) has every line at 1 segment, so a compliant re-issue always exists, while a 2-line script of 10-segment chains is rejected with the same guidance. For multi-line commands the rejection message names the worst offending line (line number + its segment count) so the model can fix that line.
 
 5. **Rejection message must be actionable**
 
-   Thrown error text (single source of truth, exported constant):
+   Thrown error text (single source of truth, exported message builder):
 
    ```
    [opencode-bash-guard] Complex one-liner rejected (4 chained commands, nesting depth 2).
@@ -83,7 +84,24 @@ API facts verified against `@opencode-ai/plugin@1.18.6` types and the opencode m
    per line — each command is then permission-checked individually.
    ```
 
-   The message contains the actual counts (so the model can self-correct) and both compliant forms. Throwing means the command never executes and no permission dialog appears — the model retries on its own.
+   For a multi-line command the message names the worst offending line instead of the total:
+
+   ```
+   [opencode-bash-guard] Complex command rejected (line 2: 5 chained commands, nesting depth 2).
+   Re-issue as separate bash tool calls, or as a multi-line script with one command
+   per line — each command is then permission-checked individually.
+   ```
+
+   For an over-threshold interpreter inline script the guidance is interpreter-specific:
+
+   ```
+   [opencode-bash-guard] Complex inline script rejected (node -e: 9 statements).
+   Re-issue with one statement per line inside the quoted script, as separate bash
+   tool calls, or move the script to a file — each statement/command is then
+   readable and permission-checked individually.
+   ```
+
+   The message contains the actual counts (so the model can self-correct) and the compliant forms. Throwing means the command never executes and no permission dialog appears — the model retries on its own.
 
 6. **Restructured output is still fully verified**
 
@@ -102,14 +120,23 @@ API facts verified against `@opencode-ai/plugin@1.18.6` types and the opencode m
 
 8. **Repeated violations: same rejection every time**
 
-   No attempt counter in v1. A compliant re-issue always exists (multi-line), so the loop terminates on compliance; the model can also give up or ask the user. Counters/escalation deferred until observed to be a problem.
+   No attempt counter in v1. A compliant re-issue always exists (multi-line, one command per line), so the loop terminates on compliance; the model can also give up or ask the user. Counters/escalation deferred until observed to be a problem.
+
+9. **Interpreter inline scripts are complexity-checked too**
+
+   `python`/`python3 -c`, `perl -e`, `node -e`/`--eval`, `ruby -e`, `php -r`, and heredoc-scripted interpreters carry whole programs inside a single shell segment — a 40-statement `node -e` one-liner looks like one benign segment to shell-level metrics, so the segment/depth checks never see it. When `restructure` is enabled, the plugin adds an inline-script metric: **statement count inside the script string** (split on `;` and newlines — a deliberate crude heuristic; no per-language parsers in v1), compared against the same `max_segments` threshold. An over-threshold inline script on an ask-resolving chain is rejected with interpreter-specific guidance (see decision 5): re-issue with one statement per line inside the quoted script — `python -c`, `node -e`, and `perl -e` all accept multi-line script strings — or move the script to a file. This keeps the check deterministic and dependency-free; per-language AST parsing is out of scope for v1.
+
+## Future Directions (discussed in review, not in v1 scope)
+
+- **Plugin-injected instructions (no manual AGENTS.md step).** Today the AGENTS.md snippet (decision 7) is a manual soft layer. A follow-up change should investigate injecting the "one command per line" guidance from the plugin itself — zero user steps — if the opencode plugin API exposes a workable system-prompt/instructions hook. This only reduces rejection frequency; the deterministic rejection path does not depend on it.
+- **Learned complexity/risk classification (TypeSafe "Jev").** The AST-threshold approach (`max_segments`, `max_depth`, statement counts) is deterministic but brittle at the margins — "is this command readable?" is a fuzzy judgment that hand-written thresholds approximate. A System One-style structured-output classifier (typesafe.ai Jev: typed decisions with calibrated probabilities, fast and cheap, schema outputs that cannot hallucinate types) could score commands where thresholds disagree with intuition. Viable only as an optional, off-by-default detector backend (e.g. `"detector": "ast" | "jev"`): the deterministic path stays the source of truth and the fallback when the service is unavailable; the privacy implication of commands leaving the machine must be documented; adoption gated on early-access availability.
 
 ## Risks / Trade-offs
 
-- **[Retry loops burn tokens]** Mitigated structurally: a compliant multi-line form never violates `max_segments`, so the loop cannot deadlock. Depth-gated rejections may still retry; the message carries exact counts.
+- **[Retry loops burn tokens]** Mitigated structurally: a compliant one-command-per-line form has 1 segment per line and cannot violate `max_segments`, so the loop cannot deadlock. Depth- and inline-script-gated rejections may still retry; the message carries exact counts.
 - **[False positives on legitimate pipelines]** `cat a | grep b | wc -l` (3 segments) passes defaults; a single-line 4-stage pipeline gets rejected. Mitigation: thresholds are user-configurable in the JSONC file; document raising `max_segments`.
 - **[Throw suppresses the dialog for rejected ask-chains]** Intended: the model retries first; the human then reviews a readable form. Users who prefer to review the raw blob can disable the feature.
 - **[JSONC dependency + two-location merge]** Adds `jsonc-parser`; merge precedence (project over global) must be documented to avoid confusion. Invalid files fail safe (feature off, warning).
 - **[Config read once at startup]** Same limitation as the existing `config` hook; restart to apply.
-- **[Multi-line scripts with per-line chains pass the segment check]** Accepted edge for v1 (see decision 4); ask still gates uncovered segments; per-line refinement possible later.
+- **[Inline-script statement counting is heuristic]** Splitting on `;`/newlines can miscount strings containing semicolons or multi-statement lines; the metric errs toward rejection of unreadable blobs, the guidance offers the compliant form, and per-language parsing is a possible refinement.
 - **[Related but separate: `permission.ask` may never fire in current opencode]** Issue anomalyco/opencode#19469 suggests the deny path of this plugin may not hard-block. Out of scope here; needs its own verification and possibly a fix change.

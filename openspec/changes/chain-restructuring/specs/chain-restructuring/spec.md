@@ -50,7 +50,7 @@ The `restructure` section SHALL have nested fields: `enabled` (boolean, default 
 
 ### Requirement: Detect command complexity
 
-The system SHALL compute, per command, the segment count (existing `parseChain` output, including meta-command bodies) and the maximum substitution nesting depth reached while walking `$()`, backticks, and meta-command string arguments. Limits are exceeded when a metric is strictly greater than its threshold. The segment-count limit SHALL apply to single-line commands only; a command containing a newline SHALL be exempt from the segment-count limit but still subject to the depth limit.
+The system SHALL compute, per command, the segment count (existing `parseChain` output, including meta-command bodies) and the maximum substitution nesting depth reached while walking `$()`, backticks, and meta-command string arguments. Limits are exceeded when a metric is strictly greater than its threshold. The segment-count limit SHALL apply per line: a single-line command is checked as one line; a multi-line command SHALL have every line checked individually against the limit. The depth limit SHALL apply to the whole command in every shape.
 
 #### Scenario: Single-line chain over segment threshold
 
@@ -62,10 +62,15 @@ The system SHALL compute, per command, the segment count (existing `parseChain` 
 - **WHEN** command is `a && b && c` (3 segments, no newline), `max_segments: 3`
 - **THEN** limits are not exceeded
 
-#### Scenario: Multi-line script exempt from segment limit
+#### Scenario: Multi-line script with one command per line — passes
 
 - **WHEN** command is a 5-line script with one command per line, `max_segments: 3`
-- **THEN** the segment limit is not exceeded (multi-line is the compliant form)
+- **THEN** no line exceeds the segment limit (each line is a single segment) — limits are not exceeded, multi-line remains the compliant form
+
+#### Scenario: Multi-line script with long per-line chains — rejected
+
+- **WHEN** command is a 2-line script where each line is a 5-segment `&&`-chain, `max_segments: 3`
+- **THEN** limits are exceeded and the rejection message names the offending line number and its segment count
 
 #### Scenario: Nesting depth over threshold in any form
 
@@ -82,9 +87,28 @@ The system SHALL compute, per command, the segment count (existing `parseChain` 
 - **WHEN** command is `git status`, `max_segments: 3`, `max_depth: 2`
 - **THEN** limits are not exceeded
 
+### Requirement: Complexity-check interpreter inline scripts
+
+When `restructure` is enabled, the system SHALL additionally compute, for segments invoking an interpreter with an inline script argument — `python`/`python3 -c`, `perl -e`, `node -e`/`--eval`, `ruby -e`, `php -r`, and heredoc-scripted interpreters — the statement count inside the script string (split on `;` and newlines). An inline-script statement count strictly greater than `max_segments` SHALL count as limits exceeded for that command.
+
+#### Scenario: Long inline python script rejected
+
+- **WHEN** command is `python3 -c "import os; os.system('a'); os.system('b'); os.system('c'); os.system('d')"` (5 statements) on an ask-resolving chain, `max_segments: 3`
+- **THEN** limits are exceeded and the guidance names the interpreter inline script
+
+#### Scenario: Pretty-formatted inline script passes
+
+- **WHEN** the same program is re-issued with newline-separated statements inside the quoted script (one statement per line), each count within `max_segments`
+- **THEN** limits are not exceeded — pretty formatting is the compliant form
+
+#### Scenario: Non-interpreter command unaffected
+
+- **WHEN** command is `python3 script.py --verbose` (no inline script argument)
+- **THEN** the inline-script metric does not apply; only the usual segment/depth checks run
+
 ### Requirement: Reject ask-resolving complex one-liners with actionable guidance
 
-When `restructure` is enabled AND limits are exceeded AND the chain resolves to `ask`, the plugin SHALL reject the command by throwing in `tool.execute.before` — nothing SHALL execute and no permission dialog SHALL appear for that call. The error message SHALL include the actual segment count and nesting depth and SHALL instruct the model to re-issue the command as separate bash tool calls or as a multi-line script with one command per line. Chains resolving to `allow`, `deny`, or `null`, and parse-error fail-closed denies, SHALL follow existing flows unchanged.
+When `restructure` is enabled AND limits are exceeded AND the chain resolves to `ask`, the plugin SHALL reject the command by throwing in `tool.execute.before` — nothing SHALL execute and no permission dialog SHALL appear for that call. The error message SHALL include the actual segment count and nesting depth — for multi-line commands, the worst offending line number and its segment count; for interpreter inline scripts, the interpreter and statement count — and SHALL instruct the model to re-issue the command as separate bash tool calls or as a multi-line script with one command per line. Chains resolving to `allow`, `deny`, or `null`, and parse-error fail-closed denies, SHALL follow existing flows unchanged.
 
 #### Scenario: Allowed complex chain passes through — allowed stays allowed
 
