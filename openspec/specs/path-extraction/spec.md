@@ -49,3 +49,27 @@ Each extracted path token SHALL be resolved to an absolute path. Relative paths 
 #### Scenario: Absolute path
 - **WHEN** the path is `/etc/hosts`
 - **THEN** the resolved path is `/etc/hosts`
+
+### Requirement: Extract redirect targets
+
+The system SHALL collect each segment's redirects — both command-level and statement-level — recording the operator, target text, and file descriptor. Redirections remain excluded from word-argument extraction. Well-known redirects SHALL be flagged and excluded from path checking: the target `/dev/null`, numeric-only targets (file-descriptor duplicates such as `2>&1`), and heredoc operators (`<<`, `<<-`, `<<<`). All other targets SHALL be captured for permission checking.
+
+#### Scenario: File redirect captured
+- **WHEN** the segment is `ls -la > /tmp/out.txt`
+- **THEN** the redirect target `/tmp/out.txt` is captured and is not flagged well-known
+
+#### Scenario: Redirect inside a chain attaches to its own segment
+- **WHEN** the command is `echo hello > file.txt && cat file.txt`
+- **THEN** only the `echo hello > file.txt` segment carries the redirect; the `cat file.txt` segment carries none
+
+#### Scenario: /dev/null is well-known
+- **WHEN** the redirect is `> /dev/null`
+- **THEN** it is flagged well-known and excluded from path checking
+
+#### Scenario: File-descriptor duplicate is well-known
+- **WHEN** the redirect is `2>&1`
+- **THEN** the numeric-only target is flagged well-known
+
+#### Scenario: Heredoc is well-known
+- **WHEN** the redirect operator is `<<`, `<<-`, or `<<<`
+- **THEN** it is flagged well-known

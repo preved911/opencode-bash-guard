@@ -34,6 +34,18 @@ The system SHALL extract `external_directory` from the merged Config object. Bot
 - **WHEN** the config has `"external_directory": "ask"`
 - **THEN** the plugin SHALL treat all external paths with action `"ask"`
 
+### Requirement: Read permission.edit from merged config
+
+The system SHALL extract `permission.edit` from the merged Config object for redirect-target checking. Both flat string form (`"edit": "ask"`) and object form SHALL be supported; the flat form SHALL be treated as a single `"*"` pattern. Invalid action values SHALL fall back to `"ask"`.
+
+#### Scenario: Object form
+- **WHEN** the config has `"edit": { "docs/**": "allow", "*": "ask" }`
+- **THEN** the patterns are parsed with their actions
+
+#### Scenario: Flat string form
+- **WHEN** the config has `"edit": "deny"`
+- **THEN** it is treated as a single `{ "*": "deny" }` pattern
+
 ### Requirement: Detect unsupported config
 
 The plugin SHALL check that `"*": "ask"` is in effect for bash. If `"bash": "allow"` or `"*": "allow"`, the plugin SHALL log a warning and disable itself.
@@ -69,3 +81,31 @@ For each extracted file path from a segment, resolve to absolute path and check 
 #### Scenario: Path outside allowed directory
 - **WHEN** `external_directory` is `{ "./**": "allow", "*": "ask" }` and the path is `/etc/passwd`
 - **THEN** a violation is detected with action `"ask"`
+
+### Requirement: Check redirect targets against edit rules and external_directory
+
+For each segment redirect that is not well-known, the system SHALL resolve the target to an absolute path against the cwd and match it against the parsed `permission.edit` patterns (same glob matcher and last-match-wins as bash patterns); the matched action SHALL contribute to the segment's resolution. When the resolved target falls outside the cwd, the target SHALL additionally be checked against `external_directory` patterns and a violation's action SHALL contribute. Contributions combine with the segment's other checks most-restrictive-wins (`deny` > `ask` > `allow`); no matching rule at all SHALL leave the segment's action unchanged.
+
+#### Scenario: Redirect target inside cwd checks only edit rules
+- **WHEN** `permission.edit` is `{ "/project/**": "allow" }`, `external_directory` is `{ "*": "deny" }`, and the redirect target `output.txt` resolves inside `/project`
+- **THEN** only the edit rule applies and the segment resolves to `allow`
+
+#### Scenario: Redirect target outside cwd checked against both levels
+- **WHEN** `permission.edit` is `{ "/etc/**": "deny" }`, `external_directory` is `{ "./**": "allow", "*": "ask" }`, cwd is `/project`, and the target is `/etc/passwd`
+- **THEN** the edit rule contributes `deny` and the segment resolves to `deny`
+
+#### Scenario: Redirect target outside cwd with no edit match
+- **WHEN** no edit rule matches, the `external_directory` default is `"deny"`, and the target is `/tmp/foo` outside cwd
+- **THEN** the external_directory violation contributes `deny`
+
+#### Scenario: Edit ask rule triggers ask
+- **WHEN** `permission.edit` is `{ "*": "ask" }` and the target is `out.txt` inside cwd
+- **THEN** the segment resolves to `ask`
+
+#### Scenario: Well-known redirect skips all checks
+- **WHEN** the redirect is `2>&1` or `> /dev/null`
+- **THEN** no edit or external_directory check runs for it
+
+#### Scenario: Bash deny still wins alongside redirect checks
+- **WHEN** bash pattern is `"*": "deny"`, `permission.edit` is `{ "*": "allow" }`, and the segment has a redirect target matching the allow
+- **THEN** the segment still resolves to `deny`
