@@ -75,8 +75,8 @@ There is also an enforcement asymmetry: today the plugin only intervenes on `ask
    |---|---|
    | `tool` | command name (first token of the segment), case-sensitive |
    | `token` | exact arg token match — a flag (`-delete`) or a subcommand (`push`); case-sensitive |
-   | `position` | 0-based index over all tokens after the tool name (flags and positionals both count) |
-   | `pattern` | glob the token at `position` (`*`, `**`, path globs); required with `position` |
+   | `position` | 0-based index over all tokens after the tool name (flags and positionals both count) — or the literal string `"each"` to apply `pattern` to every remaining positional token (all must match) |
+   | `pattern` | glob the token at `position` (`*`, `**`, path globs); required with `position`; with `"each"`, every candidate must glob-match |
    | `valuePattern` | glob the token immediately following a matched `token` (flag value) |
    | `action` | `"allow" \| "ask" \| "deny"` — named `action` for consistency with the existing `BashPermissionRule.action` and opencode permission values |
    | `args` (nested) | sub-declarations evaluated on the remaining tokens after the parent `token` matches (subcommand nesting) |
@@ -86,12 +86,16 @@ There is also an enforcement asymmetry: today the plugin only intervenes on `ask
 3. **Matching semantics: independent matchers, consumed tokens, nesting walk**
 
    - The matcher engine walks the segment's token stream after the command name, left to right.
+   - Evaluation order is deterministic: `token` matchers run first (in declaration order) and consume the tokens they match; `position` matchers — single-slot and `"each"` — then evaluate over the remaining unconsumed tokens.
    - `token` matcher: matches if an unconsumed token equals it (case-sensitive). The matched token is consumed; if `valuePattern` is set, the next token must exist and glob-match it (and is consumed too), otherwise the matcher does not match.
-   - `position`+`pattern` matcher: the token at that index must glob-match `pattern`. Glob syntax follows the existing path matcher (`*` within a token, `**` across separators).
+   - `position`+`pattern` matcher (number): the token at that index must glob-match `pattern`. Glob syntax follows the existing path matcher (`*` within a token, `**` across separators).
+   - `position: "each"`+`pattern` matcher: applies to every remaining unconsumed token that does not start with `-` (flag heuristic, same one the plugin's path extraction already uses). It matches only if **all** candidate tokens glob-match `pattern` — one mismatch means the matcher does not match and contributes nothing; zero candidates also means no match. This is the variable-arity case: `cp src1 src2 dest` with every path under the work tree → allow; any path outside → no contribution → the segment falls to the stricter glob level. Flag values are not excluded from `"each"` candidates (documented limitation, same class as the tokenization one below).
    - Nested `args` are evaluated on the remaining (unconsumed) tokens only after the parent `token` matched. Tokens consumed at depth N are invisible to shallower matchers.
    - All matchers evaluate independently — a rule fires when its own matcher matches; multiple matches each contribute their action. There is no first-match short-circuit.
 
    Walkthrough, `git push --force origin main` with the config above: `push` matches → contributes `allow`, consumes `push`; nested walk on `--force origin main`: `--force` matches → contributes `deny` (`--force-with-lease` does not match). Most restrictive → **deny**.
+
+   Walkthrough, `cp /Users/me/work/a.txt /Users/me/work/b.txt /tmp/out` with an entry `{ "position": "each", "pattern": "/Users/me/work/**", "action": "allow" }`: candidate tokens are all three paths (none starts with `-`); `/tmp/out` does not glob-match → the matcher does not match → no `allow` contribution → the segment falls through to the glob/native level (typically ask). With all three paths under `/Users/me/work/**` the matcher matches → allow (overriding a native ask via decision 5).
 
 4. **Precedence: most-restrictive-wins at the args level, then the existing glob level**
 
@@ -128,5 +132,6 @@ There is also an enforcement asymmetry: today the plugin only intervenes on `ask
 - **[New config surface]** A plugin-owned file is a second place to look for permission policy. Mitigation: README documents the two-level model explicitly ("opencode.json — coarse; opencode-bash-guard.jsonc — flag-level refinement"); absence of the file disables the feature entirely.
 - **[Invalid config → feature off]** A broken `opencode-bash-guard.jsonc` silently disables args rules (warning only). Mitigation: fail-safe direction is the old, known behavior; warning names the parse error.
 - **[Quoted-token false matches]** `-delete` inside a quoted arg counts as a token. Mitigation: documented limitation; severity is an extra prompt (ask), not a bypass.
+- **[`"each"` candidate heuristic]** `position: "each"` skips tokens starting with `-` but cannot tell flag values from positionals (`find -name x.txt` leaves `x.txt` as a candidate). Mitigation: documented; for value-sensitive commands prefer `token`+`valuePattern` matchers, which consume flag values explicitly.
 - **[Force-allow surprise]** A stored allow overrides native asks — a user relying on native `"curl *": "ask"` to review all curls will not be asked for `-X GET` matches. Mitigation: args rules are opt-in; README states args rules override native matching for matched segments.
 - **[Case sensitivity]** `-x get` does not match `-X GET`. Mitigation: document; users add both spellings if needed.

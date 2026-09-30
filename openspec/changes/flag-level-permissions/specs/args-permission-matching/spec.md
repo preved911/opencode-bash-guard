@@ -2,7 +2,7 @@
 
 ### Requirement: Parse permissions rules from the plugin config file
 
-The system SHALL read an optional `permissions` array from the plugin config file `opencode-bash-guard.jsonc` (project `.opencode/` and global opencode config dir, project wins) into typed tool entries `{ tool: string, args: ArgMatcher[] }`. Each arg matcher SHALL declare exactly one of `token: string` or `position: number` + `pattern: string`, MAY declare `valuePattern: string` (with `token`) or nested `args` (with `token`), and MUST declare `action: "allow" | "ask" | "deny"`. Entries failing validation SHALL be dropped with a warning naming them. When the file or section is absent, or the file fails to parse, the parsed rule list SHALL be empty and plugin behavior SHALL be identical to before this change.
+The system SHALL read an optional `permissions` array from the plugin config file `opencode-bash-guard.jsonc` (project `.opencode/` and global opencode config dir, project wins) into typed tool entries `{ tool: string, args: ArgMatcher[] }`. Each arg matcher SHALL declare exactly one of `token: string` or `position: number | "each"` + `pattern: string`, MAY declare `valuePattern: string` (with `token`) or nested `args` (with `token`), and MUST declare `action: "allow" | "ask" | "deny"`. Entries failing validation SHALL be dropped with a warning naming them. When the file or section is absent, or the file fails to parse, the parsed rule list SHALL be empty and plugin behavior SHALL be identical to before this change.
 
 #### Scenario: Valid entries parse
 
@@ -26,7 +26,7 @@ The system SHALL read an optional `permissions` array from the plugin config fil
 
 ### Requirement: Structured arg matcher semantics
 
-The system SHALL match a segment's tokens (after the command name, whitespace-tokenized, case-sensitive) against arg matchers independently: a `token` matcher matches any unconsumed equal token and consumes it; with `valuePattern`, the next token must exist and glob-match it; a `position`+`pattern` matcher matches the token at that 0-based index against the glob; nested `args` SHALL be evaluated only on the remaining tokens after the parent `token` matcher matched, with tokens consumed at deeper levels invisible to shallower matchers. Every matched matcher SHALL contribute its action; no matcher short-circuits another.
+The system SHALL match a segment's tokens (after the command name, whitespace-tokenized, case-sensitive) against arg matchers independently: a `token` matcher matches any unconsumed equal token and consumes it; with `valuePattern`, the next token must exist and glob-match it; a `position`+`pattern` matcher matches the token at that 0-based index against the glob, or — when `position` is the literal string `"each"` — SHALL match only if every remaining unconsumed token that does not start with `-` glob-matches the pattern (one mismatch or zero candidates means no match); nested `args` SHALL be evaluated only on the remaining tokens after the parent `token` matcher matched, with tokens consumed at deeper levels invisible to shallower matchers. `token` matchers SHALL consume before `position` matchers evaluate. Every matched matcher SHALL contribute its action; no matcher short-circuits another.
 
 #### Scenario: Flag token matches anywhere
 
@@ -47,6 +47,31 @@ The system SHALL match a segment's tokens (after the command name, whitespace-to
 
 - **WHEN** matcher is `{ "position": 0, "pattern": "/Users/me/work/**", "action": "allow" }` and segment is `find /tmp -type f`
 - **THEN** the matcher does not match
+
+#### Scenario: Each-position — all candidates match
+
+- **WHEN** matcher is `{ "position": "each", "pattern": "/Users/me/work/**", "action": "allow" }` and segment is `cp /Users/me/work/a.txt /Users/me/work/b.txt /Users/me/work/dest/`
+- **THEN** the matcher matches (all three paths glob-match) and contributes `allow`
+
+#### Scenario: Each-position — one mismatch fails the whole matcher
+
+- **WHEN** same matcher and segment is `cp /Users/me/work/a.txt /tmp/out`
+- **THEN** the matcher does not match and contributes nothing; the segment falls to the glob level
+
+#### Scenario: Each-position ignores flag-like tokens
+
+- **WHEN** same matcher and segment is `cp -R /Users/me/work/a.txt /Users/me/work/b.txt`
+- **THEN** the matcher matches (`-R` is not a candidate; both paths glob-match)
+
+#### Scenario: Each-position — no candidates means no match
+
+- **WHEN** same matcher and segment is `cp` (no positional tokens)
+- **THEN** the matcher does not match
+
+#### Scenario: Each-position combines with other matchers
+
+- **WHEN** a `find` entry declares both `{ "position": "each", "pattern": "/Users/me/work/**", "action": "allow" }` and `{ "token": "-delete", "action": "ask" }`, and segment is `find /Users/me/work/a /Users/me/work/b -delete`
+- **THEN** both matchers contribute (`allow`, `ask`) and the args-level action is `ask`
 
 #### Scenario: Flag value pattern
 

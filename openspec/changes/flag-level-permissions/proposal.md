@@ -13,7 +13,7 @@ Because these rules are bash-guard's own vocabulary — structured per-tool arg 
 - **New plugin config section `permissions`** in `opencode-bash-guard.jsonc` — an array of per-tool entries `{ "tool": "find", "args": [...] }`, one entry per command whose flags need their own policy
 - **Structured arg matchers** (replaces whole-string patterns):
   - `token` — exact arg token match, for flags (`-delete`) and subcommands (`push`)
-  - `position` + `pattern` — positional token with a value glob (e.g. first path argument under `/Users/me/work/*`)
+  - `position` + `pattern` — a positional slot (`position: 0`) or every remaining positional token (`position: "each"`, all of them must match) checked against a value glob (e.g. first path argument under `/Users/me/work/*`, or all paths of a variable-arity command confined to the work tree)
   - `valuePattern` — glob against the value that follows a matched flag (`-name "*.log"`)
   - `action` — `"allow" | "ask" | "deny"` per matcher
 - **Most-restrictive-wins** — all arg matchers a segment matches contribute their actions; the most restrictive one decides (deny > ask > allow). Declaration order is irrelevant; no shadowing
