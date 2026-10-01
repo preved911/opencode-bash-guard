@@ -70,8 +70,8 @@ The system SHALL match a segment's tokens (after the command name, whitespace-to
 
 #### Scenario: Each-position combines with other matchers
 
-- **WHEN** a `find` entry declares both `{ "position": "each", "pattern": "/Users/me/work/**", "action": "allow" }` and `{ "token": "-delete", "action": "ask" }`, and segment is `find /Users/me/work/a /Users/me/work/b -delete`
-- **THEN** both matchers contribute (`allow`, `ask`) and the args-level action is `ask`
+- **WHEN** a `find` entry declares both `{ "position": "each", "pattern": "/Users/me/work/**", "action": "allow" }` and `{ "token": "-delete", "action": "deny" }`, and segment is `find /Users/me/work/a /Users/me/work/b -delete`
+- **THEN** both matchers contribute (`allow`, `deny`) and the args-level action is `deny` — the command is allowed except with `-delete`
 
 #### Scenario: Flag value pattern
 
@@ -125,6 +125,11 @@ For each segment, the bash action SHALL be resolved as: args-level action when a
 
 - **WHEN** `permissions` has `curl` → `{ "token": "-X", "valuePattern": "GET", "action": "allow" }`, native `permission.bash` has `"*": "ask"`, and segment is `curl -X GET https://api.com`
 - **THEN** the segment's action is `allow` from the args level, stored for the callID, and `permission.ask` sets `output.status = "allow"` — the command runs without a prompt
+
+#### Scenario: Args deny overrides a glob allow
+
+- **WHEN** native `permission.bash` has `"find *": "allow"`, `permissions` has `find` → `{ "token": "-delete", "action": "deny" }`, and segment is `find /tmp -delete`
+- **THEN** the segment's action is `deny` from the args level — args decisions precede the glob level whenever any matcher matched, so `find` stays allowed everywhere except with `-delete`
 
 #### Scenario: Unmatched segment falls through to glob level
 
