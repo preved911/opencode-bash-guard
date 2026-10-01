@@ -13,6 +13,7 @@ const baseConfig: PluginConfig = {
   editRules: [],
   externalDirectoryRules: [{ pattern: "./**", action: "allow" }],
   externalDirectoryDefault: "ask",
+    toolPermissions: [],
   enabled: true,
 };
 

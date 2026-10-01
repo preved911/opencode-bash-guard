@@ -6,8 +6,9 @@ import {
   pluginConfigPaths,
   readPluginConfigFiles,
   parsePluginConfig,
-  loadRestructureConfig,
+  loadPluginConfig,
   DEFAULT_RESTRUCTURE_CONFIG,
+  DEFAULT_PLUGIN_FILE_CONFIG,
 } from "../plugin-config.js";
 import type { PluginConfigFile } from "../plugin-config.js";
 
@@ -57,15 +58,15 @@ describe("readPluginConfigFiles", () => {
 describe("parsePluginConfig", () => {
   it("no files → defaults with restructure disabled", () => {
     const result = parsePluginConfig([]);
-    expect(result).toEqual(DEFAULT_RESTRUCTURE_CONFIG);
-    expect(result.enabled).toBe(false);
-    expect(result.maxSegments).toBe(3);
-    expect(result.maxDepth).toBe(2);
+    expect(result).toEqual(DEFAULT_PLUGIN_FILE_CONFIG);
+    expect(result.restructure.enabled).toBe(false);
+    expect(result.restructure.maxSegments).toBe(3);
+    expect(result.restructure.maxDepth).toBe(2);
   });
 
   it("config without restructure section → disabled", () => {
     const result = parsePluginConfig([file("global.jsonc", '{"other": true}')]);
-    expect(result.enabled).toBe(false);
+    expect(result.restructure.enabled).toBe(false);
   });
 
   it("JSONC comments and trailing commas accepted", () => {
@@ -77,14 +78,14 @@ describe("parsePluginConfig", () => {
       },
     }`;
     const result = parsePluginConfig([file("global.jsonc", content)]);
-    expect(result).toEqual({ enabled: true, maxSegments: 4, maxDepth: 2 });
+    expect(result.restructure).toEqual({ enabled: true, maxSegments: 4, maxDepth: 2 });
   });
 
   it("project overrides global, unset project fields fall back to global", () => {
     const globalFile = file("global.jsonc", '{"restructure": { "enabled": true, "max_segments": 3 }}');
     const projectFile = file("project.jsonc", '{"restructure": { "max_segments": 5 }}');
     const result = parsePluginConfig([globalFile, projectFile]);
-    expect(result).toEqual({ enabled: true, maxSegments: 5, maxDepth: 2 });
+    expect(result.restructure).toEqual({ enabled: true, maxSegments: 5, maxDepth: 2 });
   });
 
   it("invalid JSONC → warning naming the file + feature disabled", () => {
@@ -92,8 +93,8 @@ describe("parsePluginConfig", () => {
     const good = file("global.jsonc", '{"restructure": { "enabled": true }}');
     const bad = file("project.jsonc", '{"restructure": { "enabled": true,,,, }}');
     const result = parsePluginConfig([good, bad]);
-    expect(result.enabled).toBe(false);
-    expect(result).toEqual(DEFAULT_RESTRUCTURE_CONFIG);
+    expect(result.degraded).toBe(true);
+    expect(result.restructure.enabled).toBe(false);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("project.jsonc"));
   });
 
@@ -101,20 +102,20 @@ describe("parsePluginConfig", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const content = '{"restructure": { "enabled": true, "max_segments": 0, "max_depth": "many" }}';
     const result = parsePluginConfig([file("global.jsonc", content)]);
-    expect(result).toEqual({ enabled: true, maxSegments: 3, maxDepth: 2 });
+    expect(result.restructure).toEqual({ enabled: true, maxSegments: 3, maxDepth: 2 });
     expect(warn).toHaveBeenCalledTimes(2);
   });
 
   it("explicit values honored", () => {
     const content = '{"restructure": { "enabled": true, "max_segments": 5, "max_depth": 1 }}';
     const result = parsePluginConfig([file("global.jsonc", content)]);
-    expect(result).toEqual({ enabled: true, maxSegments: 5, maxDepth: 1 });
+    expect(result.restructure).toEqual({ enabled: true, maxSegments: 5, maxDepth: 1 });
   });
 
   it("non-boolean enabled is not enabled", () => {
     const content = '{"restructure": { "enabled": "yes" }}';
     const result = parsePluginConfig([file("global.jsonc", content)]);
-    expect(result.enabled).toBe(false);
+    expect(result.restructure.enabled).toBe(false);
   });
 });
 
@@ -130,8 +131,8 @@ describe("loadRestructureConfig", () => {
     const prev = process.env.XDG_CONFIG_HOME;
     process.env.XDG_CONFIG_HOME = xdg;
     try {
-      const result = loadRestructureConfig(project);
-      expect(result).toEqual({ enabled: true, maxSegments: 6, maxDepth: 3 });
+      const result = loadPluginConfig(project);
+      expect(result.restructure).toEqual({ enabled: true, maxSegments: 6, maxDepth: 3 });
     } finally {
       if (prev !== undefined) process.env.XDG_CONFIG_HOME = prev;
       fs.rmSync(xdg, { recursive: true, force: true });
@@ -144,8 +145,8 @@ describe("loadRestructureConfig", () => {
     const prev = process.env.XDG_CONFIG_HOME;
     process.env.XDG_CONFIG_HOME = path.join(os.tmpdir(), `obg-nope-${Date.now()}`);
     try {
-      const result = loadRestructureConfig(project);
-      expect(result).toEqual(DEFAULT_RESTRUCTURE_CONFIG);
+      const result = loadPluginConfig(project);
+      expect(result).toEqual(DEFAULT_PLUGIN_FILE_CONFIG);
     } finally {
       if (prev !== undefined) process.env.XDG_CONFIG_HOME = prev;
       fs.rmSync(project, { recursive: true, force: true });
