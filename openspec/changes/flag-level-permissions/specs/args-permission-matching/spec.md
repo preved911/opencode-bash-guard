@@ -2,7 +2,7 @@
 
 ### Requirement: Parse permissions rules from the plugin config file
 
-The system SHALL read an optional `permissions` array from the plugin config file `opencode-bash-guard.jsonc` (project `.opencode/` and global opencode config dir, project wins) into typed tool entries `{ tool: string, args: ArgMatcher[] }`. Each arg matcher SHALL declare exactly one of `token: string` or `position: number | "each"` + `pattern: string`, MAY declare `valuePattern: string` (with `token`) or nested `args` (with `token`), and MUST declare `action: "allow" | "ask" | "deny"`. Entries failing validation SHALL be dropped with a warning naming them. When the file or section is absent, or the file fails to parse, the parsed rule list SHALL be empty and plugin behavior SHALL be identical to before this change.
+The system SHALL read an optional `permissions` array from the plugin config file `opencode-bash-guard.jsonc` (project `.opencode/` and global opencode config dir, project wins) into typed tool entries `{ tool: string, args: ArgMatcher[] }`. Each arg matcher SHALL declare exactly one of `token: string` or `position: number | "all" | "any"` + `pattern: string`, MAY declare `valuePattern: string` (with `token`) or nested `args` (with `token`), and MUST declare `action: "allow" | "ask" | "deny"`. Matcher/action pairing SHALL be validated: `position: "all"` is valid only with `action: "allow"`, and `position: "any"` is valid only with `action: "ask"` or `"deny"` — any other pairing is invalid. Entries failing validation SHALL be dropped with a warning naming them. When the file or section is absent, the parsed rule list SHALL be empty and plugin behavior SHALL be identical to before this change. When the file fails to parse as JSONC, the plugin SHALL enter degraded mode: `permissions` is treated as absent AND glob allows are suspended for that run — every bash segment SHALL resolve to `ask` (parse-error segments still deny) — with a warning naming the file, so a broken config can never silently disable `deny` rules that were meant to be active.
 
 #### Scenario: Valid entries parse
 
@@ -14,19 +14,24 @@ The system SHALL read an optional `permissions` array from the plugin config fil
 - **WHEN** `permissions` contains an entry without `tool`, a matcher with both `token` and `position`, a matcher without `action`, and one with `action: "block"`
 - **THEN** each invalid entry is dropped and a warning names it
 
+#### Scenario: Invalid matcher/action pairing dropped
+
+- **WHEN** `permissions` contains `find` → `{ "position": "all", "pattern": "/safe/**", "action": "deny" }` and `rm` → `{ "position": "any", "pattern": "/etc/**", "action": "allow" }`
+- **THEN** both entries are dropped with warnings — `all` pairs only with `allow`, `any` only with `ask`/`deny` — because the inverted pairings silently protect the wrong direction
+
 #### Scenario: Section absent
 
 - **WHEN** `opencode-bash-guard.jsonc` does not exist or has no `permissions` section
 - **THEN** the args rule list is empty and no behavior changes vs. the previous release
 
-#### Scenario: Invalid config file disables the feature
+#### Scenario: Broken config file degrades to ask-everything
 
-- **WHEN** `opencode-bash-guard.jsonc` contains a JSONC syntax error
-- **THEN** a warning names the parse error and `permissions` is treated as absent; the plugin's glob-based behavior is unaffected
+- **WHEN** `opencode-bash-guard.jsonc` contains a JSONC syntax error and native config has `"find *": "allow"`, `"*": "ask"`
+- **THEN** a warning names the parse error and every bash segment resolves to `ask` — `find /tmp -delete` is **not** silently allowed by the glob allow; the prompt persists until the config is fixed
 
 ### Requirement: Structured arg matcher semantics
 
-The system SHALL match a segment's tokens (after the command name, whitespace-tokenized, case-sensitive) against arg matchers independently: a `token` matcher matches any unconsumed equal token and consumes it; with `valuePattern`, the next token must exist and glob-match it; a `position`+`pattern` matcher matches the token at that 0-based index against the glob, or — when `position` is the literal string `"each"` — SHALL match only if every remaining unconsumed token that does not start with `-` glob-matches the pattern (one mismatch or zero candidates means no match); nested `args` SHALL be evaluated only on the remaining tokens after the parent `token` matcher matched, with tokens consumed at deeper levels invisible to shallower matchers. `token` matchers SHALL consume before `position` matchers evaluate. Every matched matcher SHALL contribute its action; no matcher short-circuits another.
+The system SHALL match a segment's tokens (after the command name, whitespace-tokenized, case-sensitive) against arg matchers independently: a `token` matcher matches any unconsumed equal token and consumes it; with `valuePattern`, the next token must exist and glob-match it; a `position`+`pattern` matcher matches the token at that 0-based index against the glob. For variable-arity matching over the remaining unconsumed tokens that do not start with `-`, `position: "all"` SHALL match only if every candidate glob-matches the pattern (one mismatch or zero candidates means no match), and `position: "any"` SHALL match if at least one candidate glob-matches the pattern (zero candidates means no match) — `all` is the conjunction shape reserved for `allow` (every path vetted before allowing), `any` is the disjunction shape reserved for `ask`/`deny` (any touch of a matching path restricts). Nested `args` SHALL be evaluated only on the remaining tokens after the parent `token` matcher matched, with tokens consumed at deeper levels invisible to shallower matchers. `token` matchers SHALL consume before `position` matchers evaluate. Every matched matcher SHALL contribute its action; no matcher short-circuits another.
 
 #### Scenario: Flag token matches anywhere
 
@@ -48,29 +53,44 @@ The system SHALL match a segment's tokens (after the command name, whitespace-to
 - **WHEN** matcher is `{ "position": 0, "pattern": "/Users/me/work/**", "action": "allow" }` and segment is `find /tmp -type f`
 - **THEN** the matcher does not match
 
-#### Scenario: Each-position — all candidates match
+#### Scenario: All-position — all candidates match
 
-- **WHEN** matcher is `{ "position": "each", "pattern": "/Users/me/work/**", "action": "allow" }` and segment is `cp /Users/me/work/a.txt /Users/me/work/b.txt /Users/me/work/dest/`
+- **WHEN** matcher is `{ "position": "all", "pattern": "/Users/me/work/**", "action": "allow" }` and segment is `cp /Users/me/work/a.txt /Users/me/work/b.txt /Users/me/work/dest/`
 - **THEN** the matcher matches (all three paths glob-match) and contributes `allow`
 
-#### Scenario: Each-position — one mismatch fails the whole matcher
+#### Scenario: All-position — one mismatch fails the whole matcher
 
 - **WHEN** same matcher and segment is `cp /Users/me/work/a.txt /tmp/out`
 - **THEN** the matcher does not match and contributes nothing; the segment falls to the glob level
 
-#### Scenario: Each-position ignores flag-like tokens
+#### Scenario: All-position ignores flag-like tokens
 
 - **WHEN** same matcher and segment is `cp -R /Users/me/work/a.txt /Users/me/work/b.txt`
 - **THEN** the matcher matches (`-R` is not a candidate; both paths glob-match)
 
-#### Scenario: Each-position — no candidates means no match
+#### Scenario: All-position — no candidates means no match
 
 - **WHEN** same matcher and segment is `cp` (no positional tokens)
 - **THEN** the matcher does not match
 
-#### Scenario: Each-position combines with other matchers
+#### Scenario: Any-position — one match restricts
 
-- **WHEN** a `find` entry declares both `{ "position": "each", "pattern": "/Users/me/work/**", "action": "allow" }` and `{ "token": "-delete", "action": "deny" }`, and segment is `find /Users/me/work/a /Users/me/work/b -delete`
+- **WHEN** matcher is `{ "position": "any", "pattern": "/etc/**", "action": "deny" }` and segment is `rm /Users/me/work/a.txt /etc/passwd`
+- **THEN** the matcher matches (`/etc/passwd` glob-matches) and contributes `deny` — one sensitive path is enough
+
+#### Scenario: Any-position — no matching candidate means no match
+
+- **WHEN** same matcher and segment is `rm /Users/me/work/a.txt /Users/me/work/b.txt`
+- **THEN** the matcher does not match and contributes nothing; the segment falls to the glob level
+
+#### Scenario: Any-position — no candidates means no match
+
+- **WHEN** same matcher and segment is `rm -rf` (only flag-like tokens)
+- **THEN** the matcher does not match
+
+#### Scenario: All-position combines with other matchers
+
+- **WHEN** a `find` entry declares both `{ "position": "all", "pattern": "/Users/me/work/**", "action": "allow" }` and `{ "token": "-delete", "action": "deny" }`, and segment is `find /Users/me/work/a /Users/me/work/b -delete`
 - **THEN** both matchers contribute (`allow`, `deny`) and the args-level action is `deny` — the command is allowed except with `-delete`
 
 #### Scenario: Flag value pattern
@@ -119,7 +139,7 @@ When one or more arg matchers match a segment, the segment's args-level action S
 
 ### Requirement: Check pipeline — args level, then permission block level, then native checks
 
-For each segment, the bash action SHALL be resolved as: args-level action when any args matcher matched; otherwise the existing `permission.bash` glob evaluation (unchanged, including last-match-wins); otherwise no opinion and native opencode permission checks apply. The old glob-based behavior SHALL be preserved for every segment no args rule matches.
+For each segment, the bash action SHALL be resolved as: args-level action when any args matcher matched; otherwise the existing `permission.bash` glob evaluation (unchanged, including last-match-wins); otherwise no opinion and native opencode permission checks apply. The old glob-based behavior SHALL be preserved for every segment no args rule matches. In degraded mode (broken config file) this pipeline is bypassed: every segment SHALL resolve to `ask` regardless of glob rules, so losing the args rules can never silently re-allow a restricted command.
 
 #### Scenario: Args allow overrides a broad native ask
 
