@@ -348,10 +348,12 @@ describe("restructure enforcement in beforeExecute", () => {
     expect(result.rejectionMessage).toContain("Complex inline script rejected");
   });
 
-  it("pretty inline script passes the gate", () => {
+  it("pretty inline script passes the gate and follows the plain ask flow", () => {
     const cmd = 'git status && python3 -c "import os\nos.system(\'a\')\nos.system(\'b\')"';
     const result = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, gitAllowConfig, enabled);
     expect(result.rejectionMessage).toBeNull();
+    expect(result.chainAction).toBe("ask");
+    expect(result.shouldWrap).toBe(true);
   });
 
   it("feature disabled — complex ask chain follows the plain ask flow", () => {
