@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { parseChain } from "../chain.js";
+import { parseChain, parseChainPerLine, detectInlineScript, countScriptStatements } from "../chain.js";
+import type { ChainSegment } from "../chain.js";
 
 describe("parseChain", () => {
   it("parses simple chain with &&", () => {
@@ -144,5 +145,137 @@ describe("parseChain", () => {
   it("includes redirect in command text", () => {
     const result = parseChain("echo test 2>/dev/null");
     expect(result.segments[0].command).toBe("echo test 2>/dev/null");
+  });
+});
+
+describe("parseChain maxDepth", () => {
+  it("empty command → depth 0", () => {
+    expect(parseChain("").maxDepth).toBe(0);
+  });
+
+  it("flat chain → depth 1", () => {
+    expect(parseChain("git status && git log").maxDepth).toBe(1);
+    expect(parseChain("echo hi").maxDepth).toBe(1);
+  });
+
+  it("single-level $() → depth 2", () => {
+    expect(parseChain('echo $(whoami)').maxDepth).toBe(2);
+  });
+
+  it("double $() nesting → depth 3", () => {
+    expect(parseChain("echo $(echo $(whoami))").maxDepth).toBe(3);
+  });
+
+  it("nested backticks → depth 3", () => {
+    expect(parseChain("echo `echo \\`echo hi\\``").maxDepth).toBe(3);
+  });
+
+  it("bash -c string arg counts as one level", () => {
+    expect(parseChain('bash -c "a && b"').maxDepth).toBe(2);
+  });
+
+  it("expansion inside meta-command body adds a level", () => {
+    expect(parseChain('bash -c "echo $(whoami)"').maxDepth).toBe(3);
+  });
+
+  it("eval string arg counts as one level", () => {
+    expect(parseChain('eval "echo hi"').maxDepth).toBe(2);
+  });
+
+  it("depth checked across multi-line commands", () => {
+    const script = "git status\necho $(echo $(whoami))";
+    expect(parseChain(script).maxDepth).toBe(3);
+  });
+});
+
+describe("parseChainPerLine", () => {
+  it("one command per line — each line a single segment", () => {
+    const result = parseChainPerLine("git status\ngit log\ngit diff\ngit show");
+    expect(result.lines).toHaveLength(4);
+    expect(result.lines.map((l) => l.segmentCount)).toEqual([1, 1, 1, 1]);
+    expect(result.lines.map((l) => l.lineNumber)).toEqual([1, 2, 3, 4]);
+    expect(result.worstLine).toEqual({ lineNumber: 1, segmentCount: 1 });
+  });
+
+  it("per-line && chains — worst line reported with correct line number", () => {
+    const result = parseChainPerLine("a && b && c && d && e\nf && g && h && i && j");
+    expect(result.lines).toHaveLength(2);
+    expect(result.lines[0]).toEqual({ lineNumber: 1, segmentCount: 5 });
+    expect(result.lines[1]).toEqual({ lineNumber: 2, segmentCount: 5 });
+    expect(result.worstLine).toEqual({ lineNumber: 1, segmentCount: 5 });
+  });
+
+  it("skips blank lines when numbering", () => {
+    const result = parseChainPerLine("git status\n\n   \ngit log");
+    expect(result.lines.map((l) => l.lineNumber)).toEqual([1, 4]);
+  });
+
+  it("empty command → no lines, no worst", () => {
+    const result = parseChainPerLine("\n\n");
+    expect(result.lines).toHaveLength(0);
+    expect(result.worstLine).toBeNull();
+  });
+});
+
+function seg(command: string, redirects: ChainSegment["redirects"] = []): ChainSegment {
+  return { command, commandName: command.split(/\s+/)[0] ?? "", redirects };
+}
+
+describe("detectInlineScript", () => {
+  it("counts ;-separated python3 -c statements", () => {
+    const info = detectInlineScript(seg(`python3 -c "import os; os.system('a'); os.system('b'); os.system('c'); os.system('d')"`));
+    expect(info).toEqual({ interpreter: "python -c", statementCount: 5 });
+  });
+
+  it("counts newline-separated statements", () => {
+    const info = detectInlineScript(seg('node -e "const a = 1;\nconst b = 2;\nconsole.log(a + b)"'));
+    expect(info).toEqual({ interpreter: "node -e", statementCount: 3 });
+  });
+
+  it("node --eval recognized", () => {
+    const info = detectInlineScript(seg('node --eval "console.log(1); console.log(2)"'));
+    expect(info).toEqual({ interpreter: "node -e", statementCount: 2 });
+  });
+
+  it("perl -e, ruby -e, php -r recognized", () => {
+    expect(detectInlineScript(seg(`perl -e 'print 1; print 2;'`))).toEqual({ interpreter: "perl -e", statementCount: 2 });
+    expect(detectInlineScript(seg(`ruby -e 'puts 1; puts 2'`))).toEqual({ interpreter: "ruby -e", statementCount: 2 });
+    expect(detectInlineScript(seg(`php -r 'echo 1; echo 2;'`))).toEqual({ interpreter: "php -r", statementCount: 2 });
+  });
+
+  it("single-statement script", () => {
+    expect(detectInlineScript(seg(`python3 -c "print('hi')"`))).toEqual({ interpreter: "python -c", statementCount: 1 });
+  });
+
+  it("heredoc-scripted interpreter counted from heredoc body", () => {
+    const info = detectInlineScript(seg("python3 << 'EOF'", [
+      { operator: "<<", target: "import os\nos.system('a')", fileDescriptor: undefined, wellKnown: true },
+    ]));
+    expect(info).toEqual({ interpreter: "python3 (heredoc)", statementCount: 2 });
+  });
+
+  it("script with trailing redirect still parsed", () => {
+    const info = detectInlineScript(seg(`python3 -c "print(1); print(2); print(3)" > out.txt`));
+    expect(info).toEqual({ interpreter: "python -c", statementCount: 3 });
+  });
+
+  it("non-interpreter command unaffected", () => {
+    expect(detectInlineScript(seg("python3 script.py --verbose"))).toBeNull();
+    expect(detectInlineScript(seg("python3 -m venv .venv"))).toBeNull();
+    expect(detectInlineScript(seg("echo hello"))).toBeNull();
+  });
+
+  it("interpreter without heredoc body unaffected", () => {
+    expect(detectInlineScript(seg("python3 - << 'EOF'", [
+      { operator: "<<", target: "", fileDescriptor: undefined, wellKnown: true },
+    ]))).toBeNull();
+  });
+});
+
+describe("countScriptStatements", () => {
+  it("splits on semicolons and newlines, drops empties", () => {
+    expect(countScriptStatements("a; b;\nc;;d")).toBe(4);
+    expect(countScriptStatements("")).toBe(0);
+    expect(countScriptStatements("  \n ; ")).toBe(0);
   });
 });
