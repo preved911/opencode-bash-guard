@@ -1,17 +1,17 @@
 ## 1. Config File Reader & Schema (`src/config.ts`)
 
 - [ ] 1.1 Add `opencode-bash-guard.jsonc` reader: discover project `.opencode/opencode-bash-guard.jsonc` and global `~/.config/opencode/opencode-bash-guard.jsonc` (`input.directory` gives project root), parse with `jsonc-parser`, deep-merge (project wins, scalars override); invalid JSONC → warning + degraded mode (args absent, glob allows suspended, every segment asks)
-- [ ] 1.2 Add types: `ArgMatcher` (`token?`, `position?: number | "all" | "any"`, `pattern?`, `valuePattern?`, `action`, `args?`), `ToolPermissionEntry { tool: string; args: ArgMatcher[] }`, extend `PluginConfig` with `toolPermissions: ToolPermissionEntry[]`
-- [ ] 1.3 Validate entries: non-empty `tool`; exactly one of `token` or `position`+`pattern` per matcher (`position` is a non-negative number or the literal `"all"`/`"any"`); required `action` ∈ {allow, ask, deny}; pairing: `"all"` only with `allow`, `"any"` only with `ask`/`deny`; `valuePattern`/nested `args` only with `token`; drop invalid entries with a per-entry warning
+- [ ] 1.2 Add types: `ArgMatcher` (`token?`, `position?: number | "all"`, `pattern?`, `valuePattern?`, `action`, `args?`), `ToolPermissionEntry { tool: string; args: ArgMatcher[] }`, extend `PluginConfig` with `toolPermissions: ToolPermissionEntry[]`
+- [ ] 1.3 Validate entries: non-empty `tool`; exactly one of `token` or `position`+`pattern` per matcher (`position` is a non-negative number or the literal `"all"`); required `action` ∈ {allow, ask, deny}; `valuePattern`/nested `args` only with `token`; drop invalid entries with a per-entry warning
 - [ ] 1.4 Write unit tests for all parsing scenarios in `specs/args-permission-matching/spec.md` (valid parse, invalid dropped, section absent, broken file)
 
 ## 2. Arg Matcher Engine (`src/config.ts`)
 
 - [ ] 2.1 Implement token-stream matcher: walk tokens after the command name; `token` = exact case-sensitive match on an unconsumed token (consumes it); `valuePattern` = glob the following token (consumes it on match)
-- [ ] 2.2 Implement `position`+`pattern` matcher: 0-based index over all tokens after the tool name, glob semantics as in `matchPathAgainstPattern` (`*`, `**`); plus `position: "all"` (every remaining unconsumed non-`-` token must glob-match; one mismatch or zero candidates → no match) and `position: "any"` (at least one candidate glob-matches; zero candidates → no match); token matchers consume before position matchers evaluate
+- [ ] 2.2 Implement `position`+`pattern` matcher: 0-based index over all tokens after the tool name, glob semantics as in `matchPathAgainstPattern` (`*`, `**`); plus `position: "all"` — candidate set is every remaining unconsumed non-`-` token, quantifier derived from action (allow: all must glob-match, one mismatch or zero candidates → no match; ask/deny: one glob-match is enough, zero candidates → no match); token matchers consume before position matchers evaluate
 - [ ] 2.3 Implement nested matching: evaluate nested `args` on remaining unconsumed tokens after the parent `token` matched; consumed tokens invisible to shallower levels
 - [ ] 2.4 Implement `matchToolPermissions(segment, entries)` returning `{ action } | null` — collect all matched matchers across entries for the tool, return most restrictive (deny > ask > allow), null when none matched
-- [ ] 2.5 Write unit tests for matcher scenarios: flag anywhere, flag absent, positional match/mismatch, all-position all-match/one-mismatch/no-candidates/flag-skip/combines-with-token-matcher, any-position one-match/no-matching-candidate/no-candidates, invalid pairing dropped, valuePattern match/mismatch, nested match, nested requires parent, consumed-token no-rematch, ask>allow, deny>ask, single match, no match
+- [ ] 2.5 Write unit tests for matcher scenarios: flag anywhere, flag absent, positional match/mismatch, all-position allow all-match/one-mismatch/no-candidates/flag-skip/combines-with-token-matcher, all-position deny/ask one-match/no-matching-candidate/no-candidates, valuePattern match/mismatch, nested match, nested requires parent, consumed-token no-rematch, ask>allow, deny>ask, single match, no match
 
 ## 3. Resolution Integration (`src/enforce.ts`)
 
@@ -30,8 +30,8 @@
 ## 5. Documentation
 
 - [ ] 5.1 README: new "Flag-level permissions" section — two-level model (opencode.json = coarse globs; `opencode-bash-guard.jsonc` = args refinement), full config example (curl `-X GET` allow, find `-delete` ask + work-path allow, cp all-paths allow via `position: "all"`, git `push --force` deny via nesting)
-- [ ] 5.2 README: document matcher fields (`tool`, `token`, `position`+`pattern` including `"all"`/`"any"` pairing rules, `valuePattern`, `action`, nested `args`), most-restrictive-wins, and the check pipeline (args level → permission block level → native checks)
-- [ ] 5.3 README known limitations: whitespace tokenization (quoted args split), case-sensitive matching, overlapping args matchers collapse to the strictest action, `"all"`/`"any"` cannot distinguish flag values from positionals, broken config degrades to ask-everything
+- [ ] 5.2 README: document matcher fields (`tool`, `token`, `position`+`pattern` including `"all"` and its action-derived quantifier, `valuePattern`, `action`, nested `args`), most-restrictive-wins, and the check pipeline (args level → permission block level → native checks)
+- [ ] 5.3 README known limitations: whitespace tokenization (quoted args split), case-sensitive matching, overlapping args matchers collapse to the strictest action, `"all"` cannot distinguish flag values from positionals, broken config degrades to ask-everything
 
 ## 6. Verification
 
