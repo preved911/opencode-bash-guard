@@ -26,7 +26,17 @@ The system SHALL read an optional `permissions` array from the plugin config fil
 
 ### Requirement: Structured arg matcher semantics
 
-The system SHALL match a segment's tokens (after the command name, whitespace-tokenized, case-sensitive) against arg matchers independently: a `token` matcher matches any unconsumed equal token and consumes it; with `valuePattern`, the next token must exist and glob-match it; a `position`+`pattern` matcher matches the token at that 0-based index against the glob. `position: "all"` is the single variable-arity notation: the candidate set is every remaining unconsumed token that does not start with `-`, and the match quantifier SHALL be derived from `action` so the matcher always fails safe — with `action: "allow"`, every candidate MUST glob-match the pattern (one mismatch or zero candidates means no match); with `action: "ask"` or `"deny"`, at least one candidate glob-matching the pattern is sufficient (zero candidates means no match). Nested `args` SHALL be evaluated only on the remaining tokens after the parent `token` matcher matched, with tokens consumed at deeper levels invisible to shallower matchers. `token` matchers SHALL consume before `position` matchers evaluate. Every matched matcher SHALL contribute its action; no matcher short-circuits another.
+The system SHALL match a segment's tokens against arg matchers independently. Tokens SHALL be argv-style and quote-aware — derived from the same AST parse the chain splitter performs, with matched quote pairs stripped (`"--force"` matches as `--force`, `--force""` as `--force`) and quoted whitespace kept within a token (`echo "a b"` yields one arg) — so quoting cannot hide a flag from a matcher. Commands whose chain parse failed never reach matcher evaluation (they fail closed earlier). `token` matching SHALL additionally expand clustered short flags: a `token` target of one letter after `-` (e.g. `-f`) SHALL also match a clustered token of single-letter short flags (e.g. `-rf`); other forms are not expanded. A `token` matcher matches any unconsumed equal token and consumes it; with `valuePattern`, the next token must exist and glob-match it. A `position`+`pattern` matcher matches the token at that 0-based index against the glob. `position: "all"` is the single variable-arity notation: the candidate set is every remaining unconsumed token that does not start with `-`, and the match quantifier SHALL be derived from `action` so the matcher always fails safe — with `action: "allow"`, every candidate MUST glob-match the pattern (one mismatch or zero candidates means no match); with `action: "ask"` or `"deny"`, at least one candidate glob-matching the pattern is sufficient (zero candidates means no match). Nested `args` SHALL be evaluated only on the remaining tokens after the parent `token` matcher matched, with tokens consumed at deeper levels invisible to shallower matchers. `token` matchers SHALL consume before `position` matchers evaluate. Every matched matcher SHALL contribute its action; no matcher short-circuits another.
+
+#### Scenario: Quoted flag cannot bypass a deny
+
+- **WHEN** tool entry is `git` with nested `push` → `{ "token": "--force", "action": "deny" }` and segment is `git push "--force" origin main`
+- **THEN** the token is argv-style `--force` (quotes stripped) and the matcher matches — quoting does not bypass the deny
+
+#### Scenario: Clustered short flags match single-letter targets
+
+- **WHEN** matcher is `{ "tool": "rm", "args": [{ "token": "-f", "action": "deny" }] }` and segment is `rm -rf /tmp/x`
+- **THEN** the clustered token `-rf` expands for matching and `-f` matches, contributing `deny`
 
 #### Scenario: Flag token matches anywhere
 

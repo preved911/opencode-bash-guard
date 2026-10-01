@@ -22,7 +22,7 @@ There is also an enforcement asymmetry: today the plugin only intervenes on `ask
 **Non-Goals:**
 - No tool-level default action in the plugin config — coarse per-command policy ("all of `rm` denied") stays expressible in opencode's `permission.bash` globs; the plugin config only refines at arg level
 - No AND-group combo rules in v1 — independent matchers + most-restrictive-wins cover the stated use cases (`all: [...]` groups are a future extension)
-- Not shell-quote-aware tokenization in v1 (documented limitation)
+- Quote-aware argv tokenization **is** in v1 (security requirement — quoted-flag bypass); what stays out: per-tool flag-value awareness for variable-arity candidates (fig-spec-driven, future refinement)
 - Not changing how glob rules match or how external_directory works
 - Not hot-reloading the config file — changes require an opencode restart (same as the existing config hook)
 
@@ -81,15 +81,15 @@ There is also an enforcement asymmetry: today the plugin only intervenes on `ask
    | `action` | `"allow" \| "ask" \| "deny"` — named `action` for consistency with the existing `BashPermissionRule.action` and opencode permission values |
    | `args` (nested) | sub-declarations evaluated on the remaining tokens after the parent `token` matches (subcommand nesting) |
 
-   Validation: an entry must have a non-empty `tool`; each arg matcher must declare exactly one of `token` or `position`(+`pattern`); `action` is required; nested `args` is only meaningful under a `token` matcher. Invalid entries are dropped with a warning naming them, same policy as existing parsers.
+   Validation: an entry must have a non-empty `tool`; each arg matcher must declare exactly one of `token` or `position`(+`pattern`); `position` is typed as a union — `number | "all"` — and nothing else validates (strict parsing rejects other string values with the entry); `action` is required; nested `args` is only meaningful under a `token` matcher. Invalid entries are dropped with a warning naming them, same policy as existing parsers.
 
    Variable-arity rationale (PR #16 review): there is deliberately **one** keyword, `"all"` — it names the candidate set (all remaining positional tokens), not the quantifier, so it does not duplicate the `action` field. The quantifier is derived from the action so the matcher always fails safe: with `allow`, every candidate must glob-match the pattern (one unsafe path → no allow → falls to the stricter glob/ask level); with `ask`/`deny`, a single matching candidate is enough (one sensitive path → restricts, so a mixed `rm work/a /etc/passwd` cannot escape the deny). The inverted behaviors an explicit quantifier would allow (every-must-match deny that misses mixed commands, any-match allow that force-allows them) are unreachable by construction — no pairing validation needed.
 
 3. **Matching semantics: independent matchers, consumed tokens, nesting walk**
 
-   - The matcher engine walks the segment's token stream after the command name, left to right.
+   - The matcher engine walks the segment's token stream after the command name, left to right. Tokens are argv-style and quote-aware (decision 7): derived from the unbash AST, matched quote pairs stripped, quoted whitespace not splitting.
    - Evaluation order is deterministic: `token` matchers run first (in declaration order) and consume the tokens they match; `position` matchers — single-slot and `"all"` — then evaluate over the remaining unconsumed tokens.
-   - `token` matcher: matches if an unconsumed token equals it (case-sensitive). The matched token is consumed; if `valuePattern` is set, the next token must exist and glob-match it (and is consumed too), otherwise the matcher does not match.
+   - `token` matcher: matches if an unconsumed token equals it (case-sensitive). The matched token is consumed; if `valuePattern` is set, the next token must exist and glob-match it (and is consumed too), otherwise the matcher does not match. Grouped short flags are expanded for matching: target `-f` also matches a clustered token `-rf` (single-dash, single-letter cluster); multi-char and `=`-valued forms are not expanded.
    - `position`+`pattern` matcher (number): the token at that index must glob-match `pattern`. Glob syntax follows the existing path matcher (`*` within a token, `**` across separators).
    - `position: "all"`+`pattern` matcher: applies to every remaining unconsumed token that does not start with `-` (flag heuristic, same one the plugin's path extraction already uses). The quantifier is derived from the action, always failing safe. With `action: "allow"`: matches only if **all** candidate tokens glob-match `pattern` — one mismatch means no match and no contribution; zero candidates also means no match. This is the variable-arity allow case: `cp src1 src2 dest` with every path under the work tree → allow; any path outside → the segment falls to the stricter glob level. With `action: "ask"`/`"deny"`: matches if **at least one** candidate glob-matches — `rm` with `{ "position": "all", "pattern": "/etc/**", "action": "deny" }` denies the moment a single path touches `/etc`, so the mixed `rm work/a /etc/passwd` case cannot escape. Flag values are not excluded from `"all"` candidates (documented limitation, same class as the tokenization one below).
    - Nested `args` are evaluated on the remaining (unconsumed) tokens only after the parent `token` matched. Tokens consumed at depth N are invisible to shallower matchers.
@@ -124,9 +124,11 @@ There is also an enforcement asymmetry: today the plugin only intervenes on `ask
 
    `resolveChain` keeps deny > ask > allow across segments. `resolveSegment` gains the args-rule check as step 1; external_directory path checks still apply afterwards and merge most-restrictive within the segment. No new aggregation rules.
 
-7. **Tokenization limitation accepted**
+7. **Tokenization: quote-aware argv-style tokens, from the unbash AST**
 
-   `echo "a b"` tokenizes to `echo`, `"a`, `b"`. A matcher could therefore match inside quoted strings. Accepted because (a) the plugin's job is gating, not parsing, (b) false matches err toward asking, and (c) argv-exact tokenization via the unbash AST is a future refinement.
+   Tokenization is quote-aware (PR #16 review: whitespace splitting is a bypass — `git push "--force"` hid the flag from a `--force → deny` matcher). Tokens SHALL be argv-style: derived from the same unbash AST parse the chain splitter already produces (no new dependency), with matched quote pairs stripped (`"--force"` → `--force`, `--force""` → `--force`) and quoted whitespace kept inside a token (`echo "a b"` → one arg `a b`). Commands that fail to parse never reach matcher evaluation (they already fail closed at the chain level). Grouped short flags are expanded for matching: a single-dash token of 2+ single-letter flags (`-rf`) also matches `token` targets `-r`/`-f` (normalized, not rewritten — the segment text is untouched).
+
+   Remaining limitations (documented, not v1 scope): tokens starting with `-` are never variable-arity candidates (negative numbers, files named `-myfile`); flag values of flags no `token` matcher consumed stay in the candidate set (`find -name x.txt` leaves `x.txt` — errs toward restriction); per-tool value awareness via `@withfig/autocomplete` specs is a future refinement.
 
 ## Risks / Trade-offs
 
@@ -134,7 +136,7 @@ There is also an enforcement asymmetry: today the plugin only intervenes on `ask
 - **[New config surface]** A plugin-owned file is a second place to look for permission policy. Mitigation: README documents the two-level model explicitly ("opencode.json — coarse; opencode-bash-guard.jsonc — flag-level refinement"); absence of the file disables the feature entirely.
 - **[Broken config → degraded mode]** A broken `opencode-bash-guard.jsonc` suspends glob allows and asks for every bash command (warning names the parse error). Deliberate fail-safe (PR #16 review): silently dropping `deny` rules on a typo would re-allow the commands the user meant to restrict; the cost of a typo is prompts, not a bypass. Mitigation for availability: the warning names the file and the fix is a restart after editing.
 - **[Entry-level drops remain fail-open]** An entry that fails *validation* (missing field, both `token` and `position`) is dropped with a warning while valid entries keep working — a typoed `deny` entry vanishes. Accepted: per-entry errors are named at startup; whole-file corruption (the dangerous case) degrades to ask-everything.
-- **[Quoted-token false matches]** `-delete` inside a quoted arg counts as a token. Mitigation: documented limitation; severity is an extra prompt (ask), not a bypass.
+- **[Quoted/clustered flags — handled]** Quoted flags (`git push "--force"`) and clustered short flags (`rm -rf`) previously escaped `token` matchers; both are handled in v1 (argv-style tokens from the unbash AST, short-flag expansion). Residual: tokens inside command/process substitutions are only matched when they form their own segments via the chain splitter — same coverage as the existing segment-level checks.
 - **[`"all"` candidate heuristic]** `position: "all"` skips tokens starting with `-` but cannot tell flag values from positionals (`find -name x.txt` leaves `x.txt` as a candidate). Mitigation: documented; for value-sensitive commands prefer `token`+`valuePattern` matchers, which consume flag values explicitly.
 - **[Force-allow surprise]** A stored allow overrides native asks — a user relying on native `"curl *": "ask"` to review all curls will not be asked for `-X GET` matches. Mitigation: args rules are opt-in; README states args rules override native matching for matched segments.
 - **[Case sensitivity]** `-x get` does not match `-X GET`. Mitigation: document; users add both spellings if needed.

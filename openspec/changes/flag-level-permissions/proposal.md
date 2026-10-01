@@ -11,8 +11,8 @@ Because these rules are bash-guard's own vocabulary — structured per-tool arg 
 ## What Changes
 
 - **New plugin config section `permissions`** in `opencode-bash-guard.jsonc` — an array of per-tool entries `{ "tool": "find", "args": [...] }`, one entry per command whose flags need their own policy
-- **Structured arg matchers** (replaces whole-string patterns):
-  - `token` — exact arg token match, for flags (`-delete`) and subcommands (`push`)
+- **Structured arg matchers** (replaces whole-string patterns) over **quote-aware argv tokens** derived from the existing AST parse — quoting (`git push "--force"`) cannot hide a flag:
+  - `token` — exact arg token match, for flags (`-delete`), subcommands (`push`), and clustered short flags (`-f` matches inside `-rf`)
   - `position` + `pattern` — a positional slot (`position: 0`) or the single variable-arity notation (`position: "all"`: the candidate set is every remaining positional token; the match quantifier derives from `action` — `allow` requires every candidate to match, `ask`/`deny` trigger on the first match) checked against a value glob (e.g. first path argument under `/Users/me/work/*`, all paths of a variable-arity command confined to the work tree, or any path touching a sensitive directory)
   - `valuePattern` — glob against the value that follows a matched flag (`-name "*.log"`)
   - `action` — `"allow" | "ask" | "deny"` per matcher
