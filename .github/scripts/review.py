@@ -6,10 +6,12 @@ GITHUB_API = os.environ.get('GITHUB_API_URL', 'https://api.github.com')
 REPO = os.environ['GITHUB_REPOSITORY']
 
 # GitHub Models (GH_MODELS_TOKEN) was retired 2026-07-30 — do not restore it.
-# Provider swap: AI_BASE_URL=https://api.groq.com/openai/v1 AI_MODEL=openai/gpt-oss-120b
+# Free Gemini models 503 under load; AI_MODELS is tried in order until one answers.
+# Provider swap: AI_BASE_URL=https://api.groq.com/openai/v1 AI_MODELS=openai/gpt-oss-120b
 AI_BASE_URL = os.environ.get(
     'AI_BASE_URL', 'https://generativelanguage.googleapis.com/v1beta/openai').rstrip('/')
-AI_MODEL = os.environ.get('AI_MODEL', 'gemini-3.7-flash')
+AI_MODELS = [m.strip() for m in os.environ.get(
+    'AI_MODELS', 'gemini-3.7-flash,gemini-2.5-flash,gemini-2.5-flash-lite').split(',') if m.strip()]
 AI_API_KEY = os.environ.get('AI_API_KEY', '')
 
 TRANSIENT = {429, 500, 502, 503, 504}
@@ -107,7 +109,6 @@ Diff:
 ```"""
 
 request_body = {
-    'model': AI_MODEL,
     'messages': [
         {'role': 'system', 'content': 'You are a senior engineer doing code review. Be concise and direct. Respond in valid JSON: {{"summary": "...", "comments": [{{"path": "...", "line": 0, "side": "RIGHT", "body": "..."}}]}}'},
         {'role': 'user', 'content': prompt},
@@ -115,17 +116,36 @@ request_body = {
     'response_format': {'type': 'json_object'},
 }
 
+# Try each model in order; 503 under load is common on free tiers.
 # Fatal on final failure: a silent fallback comment here is how every run
 # "succeeded" for days while the review itself never worked.
-status, text = http_request(f'{AI_BASE_URL}/chat/completions', headers={
-    'Authorization': f'Bearer {AI_API_KEY}',
-    'Content-Type': 'application/json',
-}, data=request_body, method='POST')
-if status != 200:
-    print(f'GitHub Models returned HTTP {status} — aborting.', file=sys.stderr)
+review_data = None
+used_model = None
+last_status = None
+for model in AI_MODELS:
+    request_body['model'] = model
+    status, text = http_request(f'{AI_BASE_URL}/chat/completions', headers={
+        'Authorization': f'Bearer {AI_API_KEY}',
+        'Content-Type': 'application/json',
+    }, data=request_body, method='POST')
+    if status == 200:
+        try:
+            resp = json.loads(text)
+            review_data = json.loads(resp['choices'][0]['message']['content'])
+            used_model = model
+            break
+        except (KeyError, IndexError, ValueError) as e:
+            print(f'{model} returned a malformed response: {e}', file=sys.stderr)
+    else:
+        print(f'{model} -> HTTP {status}', file=sys.stderr)
+    last_status = status
+    if status in (401, 403):
+        print('API key rejected — remaining models would fail identically.', file=sys.stderr)
+        break
+
+if review_data is None:
+    print(f'All models failed (last HTTP {last_status}) — aborting.', file=sys.stderr)
     sys.exit(1)
-resp = json.loads(text)
-review_data = json.loads(resp['choices'][0]['message']['content'])
 
 valid_comments = []
 invalid_comments = []
@@ -153,7 +173,7 @@ else:
     extra = ''
 
 summary = review_data.get('summary', '')
-body = f"## 👀 AI Code Review\n\n{summary}{extra}\n\n---\n*Powered by {AI_MODEL}*"
+body = f"## 👀 AI Code Review\n\n{summary}{extra}\n\n---\n*Powered by {used_model}*"
 
 if valid_comments:
     review = gh_api(f'/pulls/{PR_NUM}/reviews', data={
