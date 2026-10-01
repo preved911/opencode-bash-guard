@@ -11,7 +11,7 @@ REPO = os.environ['GITHUB_REPOSITORY']
 AI_BASE_URL = os.environ.get(
     'AI_BASE_URL', 'https://generativelanguage.googleapis.com/v1beta/openai').rstrip('/')
 AI_MODELS = [m.strip() for m in os.environ.get(
-    'AI_MODELS', 'gemini-3.7-flash,gemini-2.5-flash,gemini-2.5-flash-lite').split(',') if m.strip()]
+    'AI_MODELS', 'gemini-3.7-flash,gemini-3.5-flash,gemini-3.5-flash-lite').split(',') if m.strip()]
 AI_API_KEY = os.environ.get('AI_API_KEY', '')
 
 TRANSIENT = {429, 500, 502, 503, 504}
