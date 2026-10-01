@@ -55,6 +55,39 @@ describe("parseConfig", () => {
   });
 });
 
+describe("opencode default fallbacks for absent permission keys", () => {
+  it("no permission key at all → default bash allow → plugin disabled", () => {
+    const result = parseConfig({});
+    expect(result.enabled).toBe(false);
+    expect(result.bashRules).toHaveLength(0);
+  });
+
+  it("bash configured, external_directory absent → native-aligned default ask", () => {
+    const config = { permission: { bash: { "*": "ask", "cat *": "allow" } } };
+    const result = parseConfig(config);
+    expect(result.externalDirectoryDefault).toBe("ask");
+    expect(result.enabled).toBe(true);
+
+    const segment = matchBashPermission("cat /etc/passwd", result.bashRules);
+    const edResult = matchExternalDirectory("/etc/passwd", result.externalDirectoryRules, result.externalDirectoryDefault, "/project");
+    expect(segment).toBe("allow");
+    expect(edResult).toEqual({ violated: true, action: "ask" });
+  });
+
+  it("edit absent → no edit-rule contribution", () => {
+    const config = { permission: { bash: { "*": "ask" } } };
+    const result = parseConfig(config);
+    expect(result.editRules).toHaveLength(0);
+  });
+
+  it("explicit external_directory object overrides the default (default stays null)", () => {
+    const config = { permission: { bash: { "*": "ask" }, external_directory: { "./**": "allow", "*": "ask" } } };
+    const result = parseConfig(config);
+    expect(result.externalDirectoryDefault).toBeNull();
+    expect(result.externalDirectoryRules).toHaveLength(2);
+  });
+});
+
 describe("matchBashPermission", () => {
   const rules = [
     { pattern: "*", action: "ask" as const },

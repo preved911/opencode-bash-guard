@@ -1,11 +1,14 @@
 import type { Plugin, Config, Hooks } from "@opencode-ai/plugin";
 import type { Permission } from "@opencode-ai/sdk";
 import { parseConfig } from "./config.js";
-import { beforeExecute, buildReadabilityMessage, handlePermissionAsk } from "./enforce.js";
+import { beforeExecute, handlePermissionAsk } from "./enforce.js";
+import { loadRestructureConfig } from "./plugin-config.js";
 
 let pluginConfig: ReturnType<typeof parseConfig> | null = null;
 
 const BashGuardPlugin: Plugin = async (input) => {
+  const restructure = loadRestructureConfig(input.directory);
+
   const hooks: Hooks = {
     config: async (config: Config) => {
       pluginConfig = parseConfig(config as unknown as Record<string, unknown>);
@@ -25,22 +28,20 @@ const BashGuardPlugin: Plugin = async (input) => {
         input.directory,
         toolOutput.args,
         pluginConfig,
+        restructure,
       );
+
+      if (result.rejectionMessage) {
+        throw new Error(result.rejectionMessage);
+      }
 
       if (result.shouldWrap && result.chainAction) {
         const originalCommand = toolOutput.args?.command || toolOutput.args?.args?.command;
         if (originalCommand && typeof originalCommand === "string") {
-          if (result.readabilityReject) {
-            toolOutput.args = {
-              ...toolOutput.args,
-              command: buildReadabilityMessage(originalCommand),
-            };
-          } else {
-            toolOutput.args = {
-              ...toolOutput.args,
-              command: `{ ${originalCommand}; }`,
-            };
-          }
+          toolOutput.args = {
+            ...toolOutput.args,
+            command: `{ ${originalCommand}; }`,
+          };
         }
       }
     },

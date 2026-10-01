@@ -1,7 +1,8 @@
 import type { PluginConfig } from "./config.js";
 import { matchBashPermission, matchExternalDirectory } from "./config.js";
-import { parseChain } from "./chain.js";
-import type { ChainSegment, RedirectInfo } from "./chain.js";
+import { parseChain, parseChainPerLine, detectInlineScript } from "./chain.js";
+import type { ChainSegment, ChainResult, RedirectInfo } from "./chain.js";
+import type { RestructureConfig } from "./plugin-config.js";
 import { extractPaths } from "./paths.js";
 import path from "path";
 
@@ -102,36 +103,82 @@ export function resolveChain(segments: ChainSegment[], cwd: string, config: Plug
 export interface BeforeExecuteResult {
   shouldWrap: boolean;
   chainAction: ChainAction;
-  readabilityReject: boolean;
+  /** Set when the restructure feature rejects the command; index.ts throws this message. */
+  rejectionMessage: string | null;
+}
+
+export type ComplexityViolationKind = "segments" | "depth" | "inline-script";
+
+export interface ComplexityViolation {
+  kind: ComplexityViolationKind;
+  segmentCount?: number;
+  worstLine?: number;
+  interpreter?: string;
+  statementCount?: number;
 }
 
 /**
- * Check whether a command has multiple top-level chain segments (pipes, &&, ||, ;)
- * that would benefit from formatting with newlines and comments, but exclude
- * single-command invocations that merely contain nested substitutions.
+ * Strictly-greater threshold semantics: a metric equal to its limit passes.
+ * Segment limit applies per line (single-line = one line); depth applies to the
+ * whole command in every shape; inline-script statement count applies per script.
  */
-export function isComplexChain(command: string): boolean {
-  const chain = parseChain(command);
-  return chain.topLevelSegments.length > 1;
+export function checkComplexity(command: string, chain: ChainResult, restructure: RestructureConfig): ComplexityViolation | null {
+  if (!restructure.enabled) return null;
+
+  let worstInline: { interpreter: string; statementCount: number } | null = null;
+  for (const seg of chain.segments) {
+    const info = detectInlineScript(seg);
+    if (info && info.statementCount > restructure.maxSegments) {
+      if (!worstInline || info.statementCount > worstInline.statementCount) {
+        worstInline = info;
+      }
+    }
+  }
+  if (worstInline) {
+    return { kind: "inline-script", interpreter: worstInline.interpreter, statementCount: worstInline.statementCount };
+  }
+
+  const multiLine = command.includes("\n");
+  if (multiLine) {
+    const perLine = parseChainPerLine(command);
+    if (perLine.worstLine && perLine.worstLine.segmentCount > restructure.maxSegments) {
+      return {
+        kind: "segments",
+        segmentCount: perLine.worstLine.segmentCount,
+        worstLine: perLine.worstLine.lineNumber,
+      };
+    }
+  } else if (chain.segments.length > restructure.maxSegments) {
+    return { kind: "segments", segmentCount: chain.segments.length };
+  }
+
+  if (chain.maxDepth > restructure.maxDepth) {
+    return { kind: "depth" };
+  }
+
+  return null;
 }
 
-/** Build a replacement command that prints a readability-formatting error. */
-export function buildReadabilityMessage(command: string): string {
-  return `cat <<'OPENGUARD'
-\u2716 Command rejected: contains multiple chained operations.
+export function buildRejectionMessage(violation: ComplexityViolation, chain: ChainResult, command: string): string {
+  if (violation.kind === "inline-script") {
+    return (
+      `[opencode-bash-guard] Complex inline script rejected (${violation.interpreter}: ${violation.statementCount} statements).\n` +
+      "Re-issue with one statement per line inside the quoted script, as separate bash tool calls, or move the script to a file — each statement/command is then readable and permission-checked individually."
+    );
+  }
 
-The agent must rewrite this command using line breaks and comments for readability:
+  const depth = chain.maxDepth;
+  if (command.includes("\n")) {
+    return (
+      `[opencode-bash-guard] Complex command rejected (line ${violation.worstLine}: ${violation.segmentCount} chained commands, nesting depth ${depth}).\n` +
+      "Re-issue as separate bash tool calls, or as a multi-line script with one command per line — each command is then permission-checked individually."
+    );
+  }
 
-  # Step 1: describe what this does
-  first-command
-  # Step 2: describe what this does
-  second-command
-
-Original command was:
-
-  ${command}
-OPENGUARD
-exit 1`;
+  return (
+    `[opencode-bash-guard] Complex one-liner rejected (${violation.segmentCount} chained commands, nesting depth ${depth}).\n` +
+    "Re-issue as separate bash tool calls, or as a multi-line script with one command per line — each command is then permission-checked individually."
+  );
 }
 
 export function beforeExecute(
@@ -140,40 +187,48 @@ export function beforeExecute(
   cwd: string,
   args: any,
   config: PluginConfig,
+  restructure: RestructureConfig = { enabled: false, maxSegments: 3, maxDepth: 2 },
 ): BeforeExecuteResult {
+  const noAction: BeforeExecuteResult = { shouldWrap: false, chainAction: null, rejectionMessage: null };
+
   if (tool.toLowerCase() !== "bash") {
-    return { shouldWrap: false, chainAction: null, readabilityReject: false };
+    return noAction;
   }
 
   const command: string | undefined = args?.command;
   if (!command || command.trim().length === 0) {
-    return { shouldWrap: false, chainAction: null, readabilityReject: false };
+    return noAction;
   }
 
   const chain = parseChain(command);
   if (chain.parseError || chain.segments.length === 0) {
     decisionStore.set(callID, { action: "deny" });
-    return { shouldWrap: true, chainAction: "deny", readabilityReject: false };
+    return { shouldWrap: true, chainAction: "deny", rejectionMessage: null };
   }
 
   const action = resolveChain(chain.segments, cwd, config);
 
   if (action === null || action === "allow") {
-    return { shouldWrap: false, chainAction: action, readabilityReject: false };
+    return { shouldWrap: false, chainAction: action, rejectionMessage: null };
   }
 
-  // Complex chain requiring approval → reject with readability instruction
-  if (action === "ask" && chain.topLevelSegments.length > 1) {
-    decisionStore.set(callID, { action: "deny" });
-    return { shouldWrap: true, chainAction: "deny", readabilityReject: true };
+  if (action === "ask" && restructure.enabled) {
+    const violation = checkComplexity(command, chain, restructure);
+    if (violation) {
+      return {
+        shouldWrap: false,
+        chainAction: "ask",
+        rejectionMessage: buildRejectionMessage(violation, chain, command),
+      };
+    }
   }
 
   if (action === "deny" || action === "ask") {
     decisionStore.set(callID, { action });
-    return { shouldWrap: true, chainAction: action, readabilityReject: false };
+    return { shouldWrap: true, chainAction: action, rejectionMessage: null };
   }
 
-  return { shouldWrap: false, chainAction: null, readabilityReject: false };
+  return noAction;
 }
 
 export function handlePermissionAsk(input: { callID?: string }, output: { status: "ask" | "deny" | "allow" }): void {

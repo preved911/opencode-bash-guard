@@ -18,63 +18,54 @@ export interface PluginConfig {
   enabled: boolean;
 }
 
+// Hardcoded opencode built-in permission defaults. opencode applies these only at
+// permission-evaluation time — plugin `config` hooks receive the raw merged user
+// config with absent keys missing — so the plugin mirrors them here.
+// Upstream: packages/opencode/src/agent/agent.ts defaults ruleset (repo anomalyco/opencode)
+// Docs: https://opencode.ai/docs/permissions/
+const OPENCODE_DEFAULT_BASH_ACTION: ExternalDirectoryAction = "allow";
+const OPENCODE_DEFAULT_EDIT_ACTION: ExternalDirectoryAction = "allow";
+const OPENCODE_DEFAULT_EXTERNAL_DIRECTORY_ACTION: ExternalDirectoryAction = "ask";
+
 function isPermissionAction(value: string): value is "ask" | "allow" | "deny" {
   return value === "ask" || value === "allow" || value === "deny";
+}
+
+function parsePermissionRules(rules: unknown): BashPermissionRule[] {
+  if (typeof rules === "string" && isPermissionAction(rules)) {
+    return [{ pattern: "*", action: rules }];
+  }
+  if (rules && typeof rules === "object") {
+    return Object.entries(rules).map(([pattern, action]) => ({
+      pattern,
+      action: (isPermissionAction(String(action)) ? String(action) : "ask") as "ask" | "allow" | "deny",
+    }));
+  }
+  return [];
 }
 
 export function parseConfig(config: Record<string, unknown>): PluginConfig {
   const permission = config.permission as Record<string, unknown> | undefined;
 
-  let bashRules: BashPermissionRule[] = [];
-  let editRules: BashPermissionRule[] = [];
-  let externalDirectoryRules: ExternalDirectoryRule[] = [];
+  const bashRules = parsePermissionRules(permission?.bash);
+  const editRules = parsePermissionRules(permission?.edit);
+
+  const wildAction = bashRules.find((r) => r.pattern === "*")?.action ?? OPENCODE_DEFAULT_BASH_ACTION;
+  const enabled = wildAction !== "allow";
+
+  const externalDirectoryRules: ExternalDirectoryRule[] = [];
   let externalDirectoryDefault: ExternalDirectoryAction | null = null;
-  let enabled = true;
-
-  if (permission) {
-    const bash = permission.bash;
-    if (typeof bash === "string" && isPermissionAction(bash)) {
-      bashRules = [{ pattern: "*", action: bash }];
-    } else if (bash && typeof bash === "object") {
-      bashRules = Object.entries(bash)
-        .filter((entry): entry is [string, unknown] => true)
-        .map(([pattern, action]) => ({
-          pattern,
-          action: (isPermissionAction(String(action)) ? String(action) : "ask") as "ask" | "allow" | "deny",
-        }));
-    }
-
-    const edit = permission.edit;
-    if (typeof edit === "string" && isPermissionAction(edit)) {
-      editRules = [{ pattern: "*", action: edit }];
-    } else if (edit && typeof edit === "object") {
-      editRules = Object.entries(edit)
-        .filter((entry): entry is [string, unknown] => true)
-        .map(([pattern, action]) => ({
-          pattern,
-          action: (isPermissionAction(String(action)) ? String(action) : "ask") as "ask" | "allow" | "deny",
-        }));
-    }
-
-    const wildAction = bashRules.find((r) => r.pattern === "*")?.action;
-    if (wildAction === "allow") {
-      enabled = false;
-    }
-
-    const ed = permission.external_directory;
-    if (typeof ed === "string" && isPermissionAction(ed)) {
-      externalDirectoryDefault = ed;
-    } else if (ed && typeof ed === "object") {
-      for (const [pattern, action] of Object.entries(ed)) {
-        if (isPermissionAction(String(action))) {
-          externalDirectoryRules.push({ pattern, action: String(action) as ExternalDirectoryAction });
-        }
+  const ed = permission?.external_directory;
+  if (ed === undefined) {
+    externalDirectoryDefault = OPENCODE_DEFAULT_EXTERNAL_DIRECTORY_ACTION;
+  } else if (typeof ed === "string" && isPermissionAction(ed)) {
+    externalDirectoryDefault = ed;
+  } else if (ed && typeof ed === "object") {
+    for (const [pattern, action] of Object.entries(ed)) {
+      if (isPermissionAction(String(action))) {
+        externalDirectoryRules.push({ pattern, action: String(action) as ExternalDirectoryAction });
       }
     }
-  }
-
-  if (!permission || !permission.bash) {
-    enabled = false;
   }
 
   return { bashRules, editRules, externalDirectoryRules, externalDirectoryDefault, enabled };

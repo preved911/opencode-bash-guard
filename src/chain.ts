@@ -19,6 +19,29 @@ export interface ChainResult {
   topLevelSegments: ChainSegment[];
   parseError: boolean;
   errors: string[];
+  /**
+   * Maximum command-context nesting depth: the top-level command body is depth 1;
+   * each `$()` / backtick substitution or meta-command (`eval`, `sh -c`, ...) string
+   * argument adds one level. 0 when nothing was parsed.
+   */
+  maxDepth: number;
+}
+
+export interface LineSegmentInfo {
+  lineNumber: number; // 1-based, matches the "line K" in rejection messages
+  segmentCount: number;
+}
+
+export interface PerLineResult {
+  lines: LineSegmentInfo[];
+  /** Most segments; first line wins on ties. Null when the command is empty. */
+  worstLine: LineSegmentInfo | null;
+}
+
+export interface InlineScriptInfo {
+  /** e.g. "python3 -c", "node -e", "python (heredoc)" — printed in rejection messages. */
+  interpreter: string;
+  statementCount: number;
 }
 
 function isWellKnownRedirect(redir: Redirect): boolean {
@@ -159,9 +182,118 @@ function parseMetaCommandArgs(command: string): string | null {
   return null;
 }
 
+function computeScriptMaxDepth(script: Script, depth: number): number {
+  let max = depth;
+  for (const stmt of script.commands) {
+    max = Math.max(max, computeNodeMaxDepth(stmt.command, depth));
+  }
+  return max;
+}
+
+function computeNodeMaxDepth(node: Node, depth: number): number {
+  let max = depth;
+  if (node.type === "Command") {
+    const cmd = node as Command;
+    for (const word of cmd.suffix) {
+      if (!word.parts) continue;
+      for (const part of word.parts) {
+        if (part.type === "CommandExpansion") {
+          const ce = part as CommandExpansionPart;
+          if (ce.script) {
+            max = Math.max(max, computeScriptMaxDepth(ce.script, depth + 1));
+          }
+        }
+      }
+    }
+    const metaArgs = parseMetaCommandArgs(getCommandText(cmd));
+    if (metaArgs) {
+      max = Math.max(max, computeScriptMaxDepth(parse(metaArgs), depth + 1));
+    }
+  } else if (node.type === "Pipeline" || node.type === "AndOr") {
+    const group = node as Pipeline | AndOr;
+    for (const cmd of group.commands) {
+      max = Math.max(max, computeNodeMaxDepth(cmd, depth));
+    }
+  } else if (node.type === "BraceGroup" || node.type === "Subshell") {
+    const body = (node as { body?: { commands?: Statement[] } }).body;
+    if (body?.commands) {
+      for (const stmt of body.commands) {
+        max = Math.max(max, computeNodeMaxDepth(stmt.command, depth));
+      }
+    }
+  }
+  return max;
+}
+
+export function parseChainPerLine(command: string): PerLineResult {
+  const rawLines = command.split("\n");
+  const lines: LineSegmentInfo[] = [];
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i];
+    if (line.trim().length === 0) continue;
+    lines.push({ lineNumber: i + 1, segmentCount: parseChain(line).segments.length });
+  }
+  let worstLine: LineSegmentInfo | null = null;
+  for (const info of lines) {
+    if (!worstLine || info.segmentCount > worstLine.segmentCount) {
+      worstLine = info;
+    }
+  }
+  return { lines, worstLine };
+}
+
+const INLINE_SCRIPT_PATTERNS: { pattern: RegExp; interpreter: string }[] = [
+  { pattern: /^(?:python3?|python)\s+-c\s+/, interpreter: "python -c" },
+  { pattern: /^perl\s+-e\s+/, interpreter: "perl -e" },
+  { pattern: /^node\s+(?:-e|--eval)\s+/, interpreter: "node -e" },
+  { pattern: /^ruby\s+-e\s+/, interpreter: "ruby -e" },
+  { pattern: /^php\s+-r\s+/, interpreter: "php -r" },
+];
+
+function stripQuotedScript(rest: string): string | null {
+  const double = rest.match(/^"((?:[^"\\]|\\.)*)"/);
+  if (double) return double[1];
+  const single = rest.match(/^'([^']*)'/);
+  if (single) return single[1];
+  return null;
+}
+
+export function countScriptStatements(script: string): number {
+  return script
+    .split(/[;\n]/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0).length;
+}
+
+const HEREDOC_INTERPRETERS = new Set(["python", "python3", "perl", "ruby", "php", "node", "sh", "bash", "zsh", "ksh"]);
+
+export function detectInlineScript(segment: ChainSegment): InlineScriptInfo | null {
+  for (const { pattern, interpreter } of INLINE_SCRIPT_PATTERNS) {
+    const match = segment.command.match(pattern);
+    if (match) {
+      const rest = segment.command.slice(match[0].length);
+      const script = stripQuotedScript(rest) ?? rest.trim();
+      if (script.length === 0) return null;
+      return { interpreter, statementCount: countScriptStatements(script) };
+    }
+  }
+
+  if (HEREDOC_INTERPRETERS.has(segment.commandName)) {
+    const heredoc = segment.redirects.find((r) => r.operator === "<<" || r.operator === "<<-");
+    if (heredoc && heredoc.target.trim().length > 0) {
+      return {
+        interpreter: `${segment.commandName} (heredoc)`,
+        statementCount: countScriptStatements(heredoc.target),
+      };
+    }
+  }
+
+  return null;
+}
+
 export function parseChain(command: string): ChainResult {
   if (!command || command.trim().length === 0) {
-    return { segments: [], topLevelSegments: [], parseError: false, errors: [] };
+    return { segments: [], topLevelSegments: [], parseError: false, errors: [], maxDepth: 0 };
   }
 
   const result = parse(command);
@@ -198,5 +330,7 @@ export function parseChain(command: string): ChainResult {
     }
   }
 
-  return { segments, topLevelSegments, parseError, errors };
+  const maxDepth = computeScriptMaxDepth(result, 1);
+
+  return { segments, topLevelSegments, parseError, errors, maxDepth };
 }
