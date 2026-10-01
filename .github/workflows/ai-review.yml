@@ -1,9 +1,6 @@
 name: AI PR Review
 on: pull_request
 
-env:
-  GH_MODELS_TOKEN: ${{ secrets.GH_MODELS_TOKEN }}
-
 jobs:
   review:
     runs-on: ubuntu-latest
@@ -19,3 +16,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_API_URL: ${{ github.api_url }}
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
