@@ -107,11 +107,68 @@ To reduce rejections further, pair with a soft instruction in your `AGENTS.md`:
 - Never write chained one-liners (`a && b && c`). If rejected, split and retry.
 ```
 
+## Flag-level permissions (optional, off by default)
+
+opencode's `permission.bash` globs match the whole command string — they cannot express "allow `curl` only with `-X GET`" or "deny `find` with `-delete`". The plugin can: declare structured arg matchers per tool in `opencode-bash-guard.jsonc`.
+
+**Two-level model:** `opencode.json` keeps coarse glob policy (`"find *": "allow"`, `"*": "ask"`); `opencode-bash-guard.jsonc` refines at flag level. Per segment, bash-guard checks args rules first — when one matches, its action decides; unmatched segments fall through to the glob evaluation; native opencode checks apply as before.
+
+```jsonc
+{
+  "permissions": [
+    {
+      // curl allowed only with -X GET; other curls keep the native ask
+      "tool": "curl",
+      "args": [{ "token": "-X", "pattern": "GET", "action": "allow" }]
+    },
+    {
+      // find paths under the work tree are allowed, except -delete
+      "tool": "find",
+      "args": [
+        { "token": "-delete", "action": "deny" },
+        { "position": "all", "pattern": "/Users/me/work/**", "action": "allow" }
+      ]
+    },
+    {
+      // git push allowed, --force denied (nested under the subcommand token)
+      "tool": "git",
+      "args": [
+        {
+          "token": "push",
+          "action": "allow",
+          "args": [{ "token": "--force", "action": "deny" }]
+        }
+      ]
+    }
+  ]
+}
+```
+
+Matcher fields:
+
+| Field | Meaning |
+|---|---|
+| `tool` | command name (first token), case-sensitive |
+| `token` | exact arg token match — a flag (`-delete`) or subcommand (`push`); clustered short flags expand (`-f` matches `-rf`); quoting cannot hide a flag |
+| `position` | `0`-based index over the **positional** tokens (tokens not starting with `-`; flags never occupy a slot) — or `"all"`, the variable-arity form over every remaining positional token |
+| `pattern` | the glob: with `position`, applied to that slot (with `"all"`, every candidate); with `token`, applied to the flag's value (`curl -X GET`) |
+| `action` | `"allow"`, `"ask"`, or `"deny"` |
+| `args` | nested rules, evaluated after the parent `token` matches (subcommand nesting) |
+
+Precedence rules:
+
+- **Most-restrictive-wins** — every matcher that matches contributes its action; the strictest decides (`deny > ask > allow`). Declaration order is irrelevant.
+- For `position: "all"` the quantifier derives from the action, always failing safe: `allow` requires **every** candidate to match (one unsafe path → no allow); `ask`/`deny` trigger on the **first** match (one sensitive path → restricted).
+- **Args-level `allow` overrides a native ask** (via the plugin's permission hook), so `curl -X GET` genuinely runs without a prompt under a `"*": "ask"` fallback. Args `ask`/`deny` wrap and store as usual.
+
+Fail-safe: a `opencode-bash-guard.jsonc` file that fails to parse puts the plugin into **degraded mode** — args rules are off and glob allows are suspended (every bash command asks) until the file is fixed, so a typo can never silently re-allow a restricted command. Absent file or section = zero behavior change.
+
+
 ## Testing
 
 ```bash
 npm install
-npm test          # runs vitest (135+ tests)
+npm test          # runs vitest (169+ tests)
 npm run build     # type-checks with tsc
 ```
 
@@ -119,6 +176,9 @@ All tests are in `src/__tests__/`. Run `npm run test:watch` during development.
 
 ## Known Limitations
 
+- **Flag-level tokenization heuristics**: tokens starting with `-` are never variable-arity candidates (negative numbers, files named `-myfile` are invisible to `position: "all"`); a dash-less flag value counts as a positional slot (`find -name x.txt` → `x.txt`, `git -c key=val` → `key=val`); matching is case-sensitive (`-X` ≠ `-x`); key=value options are full tokens (`dd if=/dev/sda` needs pattern `if=/dev/**`). For value-sensitive commands prefer `token` + `pattern` (value) matchers, which consume flag values explicitly.
+- **Overlapping args matchers collapse to the strictest action** — an `allow` matcher cannot carve an exception out of an overlapping broader matcher at the args level; narrowing is done by the glob level instead.
+- **Broken plugin config degrades to ask-everything**: if `opencode-bash-guard.jsonc` fails to parse, args rules are off and glob allows are suspended — every bash command asks until the file is fixed (a typo can never silently re-allow a restricted command, but unattended/CI sessions will stall on prompts).
 - **Config changes at runtime**: The `config` hook fires once at startup. Config changes require an opencode restart.
 - **Plugin config read once at startup**: `opencode-bash-guard.jsonc` is read once when the plugin initializes. Changes require an opencode restart.
 - **Heuristic inline-script statement counting**: Interpreter scripts are split on `;` and newlines. Strings containing semicolons can be miscounted; the heuristic errs toward rejecting unreadable blobs.

@@ -218,7 +218,7 @@ describe("parseChainPerLine", () => {
 });
 
 function seg(command: string, redirects: ChainSegment["redirects"] = []): ChainSegment {
-  return { command, commandName: command.split(/\s+/)[0] ?? "", redirects };
+  return { command, commandName: command.split(/\s+/)[0] ?? "", argv: command.split(/\s+/), redirects };
 }
 
 describe("detectInlineScript", () => {

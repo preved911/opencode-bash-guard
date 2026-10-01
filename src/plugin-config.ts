@@ -2,6 +2,7 @@ import { parse as parseJsonc, type ParseError } from "jsonc-parser";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { validateToolPermissions, type ToolPermissionEntry } from "./config.js";
 
 /** Plugin behavior tuning, read from opencode-bash-guard.jsonc. */
 export interface RestructureConfig {
@@ -14,6 +15,19 @@ export const DEFAULT_RESTRUCTURE_CONFIG: RestructureConfig = {
   enabled: false,
   maxSegments: 3,
   maxDepth: 2,
+};
+
+/** Everything the plugin loads from its own config file. `degraded` drives ask-everything enforcement. */
+export interface PluginFileConfig {
+  restructure: RestructureConfig;
+  toolPermissions: ToolPermissionEntry[];
+  degraded: boolean;
+}
+
+export const DEFAULT_PLUGIN_FILE_CONFIG: PluginFileConfig = {
+  restructure: DEFAULT_RESTRUCTURE_CONFIG,
+  toolPermissions: [],
+  degraded: false,
 };
 
 const CONFIG_FILE_NAME = "opencode-bash-guard.jsonc";
@@ -84,16 +98,16 @@ function resolveThreshold(value: unknown, fallback: number, name: string): numbe
 }
 
 /**
- * Parse the collected config files (in increasing precedence order) into the
- * effective RestructureConfig. JSONC syntax (comments, trailing commas) is
- * allowed. Any file with invalid JSONC disables the `restructure` feature
- * entirely (fail-safe: a partially-valid config must not enable enforcement)
- * and emits a warning naming the file; the plugin's core chain-guard behavior
- * is unaffected by plugin-config failures.
+ * Parse the collected config files (in increasing precedence order).
+ * JSONC syntax (comments, trailing commas) is allowed; objects deep-merge, project wins.
+ * Any file with invalid JSONC enters degraded mode: `permissions` treated as absent AND
+ * glob allows are suspended downstream (ask-everything), so a broken config can never
+ * silently re-allow a restricted command. Individual invalid `permissions` entries are
+ * dropped with a warning while the rest keep working.
  */
-export function parsePluginConfig(files: PluginConfigFile[]): RestructureConfig {
+export function parsePluginConfig(files: PluginConfigFile[]): PluginFileConfig {
   if (files.length === 0) {
-    return { ...DEFAULT_RESTRUCTURE_CONFIG };
+    return { restructure: { ...DEFAULT_RESTRUCTURE_CONFIG }, toolPermissions: [], degraded: false };
   }
 
   let merged: Record<string, unknown> = {};
@@ -104,7 +118,7 @@ export function parsePluginConfig(files: PluginConfigFile[]): RestructureConfig 
     const parsed = parseJsonc(file.content, errors, { allowTrailingComma: true });
     if (errors.length > 0 || parsed === undefined || parsed === null || typeof parsed !== "object") {
       console.warn(
-        `[opencode-bash-guard] Invalid JSONC in ${file.path} — ignoring plugin config, restructure treated as disabled.`,
+        `[opencode-bash-guard] Invalid JSONC in ${file.path} — degraded mode: every bash command will ask until the file is fixed.`,
       );
       allValid = false;
       continue;
@@ -113,23 +127,29 @@ export function parsePluginConfig(files: PluginConfigFile[]): RestructureConfig 
   }
 
   if (!allValid) {
-    return { ...DEFAULT_RESTRUCTURE_CONFIG };
+    return { restructure: { ...DEFAULT_RESTRUCTURE_CONFIG }, toolPermissions: [], degraded: true };
   }
 
   const raw = isPlainObject(merged.restructure) ? merged.restructure : {};
 
-  return {
+  const restructure: RestructureConfig = {
     enabled: raw.enabled === true,
     maxSegments: resolveThreshold(raw.max_segments, DEFAULT_RESTRUCTURE_CONFIG.maxSegments, "max_segments"),
     maxDepth: resolveThreshold(raw.max_depth, DEFAULT_RESTRUCTURE_CONFIG.maxDepth, "max_depth"),
   };
+
+  return {
+    restructure,
+    toolPermissions: validateToolPermissions(merged.permissions),
+    degraded: false,
+  };
 }
 
 /**
- * Load the effective RestructureConfig once at plugin init: discover both
+ * Load the effective plugin config once at plugin init: discover both
  * locations, read what exists, parse and merge (project wins over global).
  * Changes to the file require an opencode restart.
  */
-export function loadRestructureConfig(projectDir: string): RestructureConfig {
+export function loadPluginConfig(projectDir: string): PluginFileConfig {
   return parsePluginConfig(readPluginConfigFiles(pluginConfigPaths(projectDir)));
 }

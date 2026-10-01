@@ -11,6 +11,7 @@ export interface RedirectInfo {
 export interface ChainSegment {
   command: string;
   commandName: string;
+  argv: string[];
   redirects: RedirectInfo[];
 }
 
@@ -105,12 +106,39 @@ function extractCommandsFromNode(node: Node): Command[] {
   return result;
 }
 
+/** Strip matched quote pairs from an AST word: `"--force"` → `--force`, `--force""` → `--force`, `"a b"` stays one token `a b`. */
+export function stripQuotePairs(word: string): string {
+  let s = word;
+  let changed = true;
+  while (changed && s.length >= 2) {
+    changed = false;
+    const first = s[0];
+    const last = s[s.length - 1];
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      s = s.slice(1, -1);
+      changed = true;
+    } else if (s.includes('""')) {
+      s = s.replace('""', "");
+      changed = true;
+    }
+  }
+  return s;
+}
+
+export function extractArgv(cmd: Command): string[] {
+  const parts: string[] = [];
+  if (cmd.name?.text) parts.push(stripQuotePairs(cmd.name.text));
+  for (const word of cmd.suffix) parts.push(stripQuotePairs(word.text));
+  return parts;
+}
+
 function buildSegment(cmd: Command, stmtRedirects: Redirect[]): ChainSegment {
   const cmdRedirects = (cmd.redirects ?? []).map(redirectToInfo);
   const statementRedirects = (stmtRedirects ?? []).map(redirectToInfo);
   return {
     command: getCommandText(cmd),
     commandName: getCommandName(cmd),
+    argv: extractArgv(cmd),
     redirects: [...cmdRedirects, ...statementRedirects],
   };
 }

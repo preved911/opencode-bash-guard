@@ -1,5 +1,5 @@
 import type { PluginConfig } from "./config.js";
-import { matchBashPermission, matchExternalDirectory } from "./config.js";
+import { matchBashPermission, matchExternalDirectory, matchToolPermissions } from "./config.js";
 import { parseChain, parseChainPerLine, detectInlineScript } from "./chain.js";
 import type { ChainSegment, ChainResult, RedirectInfo } from "./chain.js";
 import type { RestructureConfig } from "./plugin-config.js";
@@ -58,7 +58,28 @@ function combineActions(a: ChainAction, b: ChainAction): ChainAction {
   return null;
 }
 
-export function resolveSegment(segment: string, segmentName: string, cwd: string, config: PluginConfig, redirects?: RedirectInfo[]): ChainAction {
+export interface SegmentResolution {
+  action: ChainAction;
+  /** True when the action came from a matched args rule (used to enforce args-level force-allow). */
+  allowFromArgsRule: boolean;
+}
+
+export function resolveSegment(
+  segment: string,
+  segmentName: string,
+  cwd: string,
+  config: PluginConfig,
+  redirects?: RedirectInfo[],
+  argv?: string[],
+): SegmentResolution {
+  const tokens = argv ?? segment.split(/\s+/).filter((t) => t.length > 0);
+
+  // Pipeline order (spec): args rules decide the segment when any matcher matched; otherwise the legacy glob evaluation.
+  const argsAction = matchToolPermissions(tokens, config.toolPermissions);
+  if (argsAction !== null) {
+    return { action: argsAction, allowFromArgsRule: argsAction === "allow" };
+  }
+
   const bashAction = matchBashPermission(segment, config.bashRules);
 
   const paths = extractPaths(segment, cwd);
@@ -80,24 +101,34 @@ export function resolveSegment(segment: string, segmentName: string, cwd: string
     combined = combineActions(combined, redirectAction);
   }
 
-  return combined;
+  return { action: combined, allowFromArgsRule: false };
 }
 
-export function resolveChain(segments: ChainSegment[], cwd: string, config: PluginConfig): ChainAction {
+export interface ChainResolution {
+  action: ChainAction;
+  /** At least one segment's allow originated from an args rule (not a glob rule). */
+  allowFromArgsRule: boolean;
+}
+
+export function resolveChain(segments: ChainSegment[], cwd: string, config: PluginConfig): ChainResolution {
   const segmentActions: ChainAction[] = [];
+  let allowFromArgsRule = false;
 
   for (const seg of segments) {
-    const action = resolveSegment(seg.command, seg.commandName, cwd, config, seg.redirects);
-    segmentActions.push(action);
+    const resolution = resolveSegment(seg.command, seg.commandName, cwd, config, seg.redirects, seg.argv);
+    segmentActions.push(resolution.action);
+    if (resolution.action === "allow" && resolution.allowFromArgsRule) {
+      allowFromArgsRule = true;
+    }
   }
 
-  if (segmentActions.includes("deny")) return "deny";
-  if (segmentActions.includes("ask")) return "ask";
+  if (segmentActions.includes("deny")) return { action: "deny", allowFromArgsRule };
+  if (segmentActions.includes("ask")) return { action: "ask", allowFromArgsRule };
 
   const allAllow = segmentActions.every((a) => a === "allow");
-  if (allAllow) return "allow";
+  if (allAllow) return { action: "allow", allowFromArgsRule };
 
-  return null;
+  return { action: null, allowFromArgsRule: false };
 }
 
 export interface BeforeExecuteResult {
@@ -188,6 +219,7 @@ export function beforeExecute(
   args: any,
   config: PluginConfig,
   restructure: RestructureConfig = { enabled: false, maxSegments: 3, maxDepth: 2 },
+  degraded = false,
 ): BeforeExecuteResult {
   const noAction: BeforeExecuteResult = { shouldWrap: false, chainAction: null, rejectionMessage: null };
 
@@ -206,9 +238,19 @@ export function beforeExecute(
     return { shouldWrap: true, chainAction: "deny", rejectionMessage: null };
   }
 
-  const action = resolveChain(chain.segments, cwd, config);
+  // Degraded mode (broken plugin config): args rules are gone and glob allows are suspended —
+  // everything asks, so a config typo can never silently re-allow a restricted command.
+  if (degraded) {
+    decisionStore.set(callID, { action: "ask" });
+    return { shouldWrap: true, chainAction: "ask", rejectionMessage: null };
+  }
+
+  const { action, allowFromArgsRule } = resolveChain(chain.segments, cwd, config);
 
   if (action === null || action === "allow") {
+    if (action === "allow" && allowFromArgsRule) {
+      decisionStore.set(callID, { action: "allow" });
+    }
     return { shouldWrap: false, chainAction: action, rejectionMessage: null };
   }
 
@@ -239,6 +281,8 @@ export function handlePermissionAsk(input: { callID?: string }, output: { status
 
   if (decision.action === "deny") {
     output.status = "deny";
+  } else if (decision.action === "allow") {
+    output.status = "allow";
   }
 
   clearStoredDecision(input.callID);

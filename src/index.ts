@@ -2,16 +2,19 @@ import type { Plugin, Config, Hooks } from "@opencode-ai/plugin";
 import type { Permission } from "@opencode-ai/sdk";
 import { parseConfig } from "./config.js";
 import { beforeExecute, handlePermissionAsk } from "./enforce.js";
-import { loadRestructureConfig } from "./plugin-config.js";
+import { loadPluginConfig } from "./plugin-config.js";
 
 let pluginConfig: ReturnType<typeof parseConfig> | null = null;
 
 const BashGuardPlugin: Plugin = async (input) => {
-  const restructure = loadRestructureConfig(input.directory);
+  const fileConfig = loadPluginConfig(input.directory);
 
   const hooks: Hooks = {
     config: async (config: Config) => {
-      pluginConfig = parseConfig(config as unknown as Record<string, unknown>);
+      pluginConfig = {
+        ...parseConfig(config as unknown as Record<string, unknown>),
+        toolPermissions: fileConfig.toolPermissions,
+      };
 
       if (!pluginConfig.enabled) {
         console.warn("[opencode-bash-guard] Disabled: bash is set to 'allow' or no bash permission config found. Set \"*\": \"ask\" to enable.");
@@ -28,7 +31,8 @@ const BashGuardPlugin: Plugin = async (input) => {
         input.directory,
         toolOutput.args,
         pluginConfig,
-        restructure,
+        fileConfig.restructure,
+        fileConfig.degraded,
       );
 
       if (result.rejectionMessage) {
