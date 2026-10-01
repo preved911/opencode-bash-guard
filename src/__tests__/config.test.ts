@@ -55,8 +55,35 @@ describe("parseConfig", () => {
   });
 });
 
-describe("opencode default fallbacks for absent permission keys", () => {
-  it("no permission key at all → default bash allow → plugin disabled", () => {
+describe("globMatch newline and parity semantics (issue #28)", () => {
+  const catchAll = [{ pattern: "*", action: "ask" as const }];
+  const pythonRules = [
+    { pattern: "*", action: "ask" as const },
+    { pattern: "python3 *", action: "allow" as const },
+  ];
+
+  it("multi-line quoted segment matches the * catch-all", () => {
+    const segment = 'python3 -c "import os\nos.system(\'a\')\nos.system(\'b\')"';
+    expect(matchBashPermission(segment, catchAll)).toBe("ask");
+  });
+
+  it("multi-line quoted segment matches a prefix rule", () => {
+    const segment = 'python3 -c "import os\nos.system(\'a\')"';
+    expect(matchBashPermission(segment, pythonRules)).toBe("allow");
+  });
+
+  it("trailing space-star is optional: git * matches bare git", () => {
+    expect(matchBashPermission("git", [{ pattern: "git *", action: "allow" as const }])).toBe("allow");
+    expect(matchBashPermission("git status", [{ pattern: "git *", action: "allow" as const }])).toBe("allow");
+  });
+
+  it("single-line matching unchanged", () => {
+    expect(matchBashPermission("git status", [{ pattern: "git *", action: "allow" as const }])).toBe("allow");
+    expect(matchBashPermission("sudo rm", [{ pattern: "sudo *", action: "deny" as const }])).toBe("deny");
+  });
+});
+
+describe("opencode default fallbacks for absent permission keys", () => {  it("no permission key at all → default bash allow → plugin disabled", () => {
     const result = parseConfig({});
     expect(result.enabled).toBe(false);
     expect(result.bashRules).toHaveLength(0);

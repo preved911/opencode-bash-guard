@@ -114,7 +114,7 @@ function matchPathAgainstPattern(filePath: string, pattern: string, cwd?: string
       .replace(/[.+^${}()|[\]\\]/g, "\\$&")
       .replace(/\*\*/g, ".*")
       .replace(/\*/g, "[^/]*");
-    const re = new RegExp(`^${regexStr}$`);
+    const re = new RegExp(`^${regexStr}$`, "s");
     return re.test(relative) || re.test(`${relative}/`);
   }
 
@@ -122,16 +122,18 @@ function matchPathAgainstPattern(filePath: string, pattern: string, cwd?: string
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
     .replace(/\*\*/g, ".*")
     .replace(/\*/g, "[^/]*");
-  const re = new RegExp(`^${regexStr}$`);
+  const re = new RegExp(`^${regexStr}$`, "s");
   return re.test(filePath) || re.test(`${filePath}/`);
 }
 
 function globMatch(str: string, pattern: string): boolean {
-  const regexStr = pattern
+  let regexStr = pattern
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
     .replace(/\*/g, ".*")
     .replace(/\?/g, ".");
-  return new RegExp(`^${regexStr}$`).test(str);
+  if (regexStr.endsWith(" .*")) regexStr = regexStr.slice(0, -3) + "( .*)?";
+  // "s" = dotAll, so * crosses newlines — mirrors opencode's native matcher (core/util/wildcard.ts), see issue #28
+  return new RegExp(`^${regexStr}$`, "s").test(str);
 }
 
 function gitignoreMatch(filePath: string, pattern: string): boolean {
