@@ -78,6 +78,11 @@ The system SHALL match a segment's tokens against arg matchers independently. To
 - **WHEN** a `find` entry declares `{ "token": "-delete", "action": "ask" }` and `{ "position": 1, "pattern": "/tmp/**", "action": "allow" }`, and segment is `find -delete /tmp`
 - **THEN** `-delete` matches and consumes at original index 0, and `position: 1` still resolves to the original token `/tmp` → both matchers contribute (`ask`, `allow`) and the args-level action is `ask`
 
+#### Scenario: Inserted global flag shifts numeric positions — rule misses, falls to glob
+
+- **WHEN** matcher is `{ "position": 0, "pattern": "push", "action": "allow" }` on tool `git`, and segment is `git -c key=val push --force` instead of `git push --force`
+- **THEN** index 0 is `-c`, not `push` — the matcher does not match and the segment falls to the glob level (documented shape-sensitivity: use `token` matchers for commands that accept interleaved global flags)
+
 #### Scenario: All-position — all candidates match
 
 - **WHEN** matcher is `{ "position": "all", "pattern": "/Users/me/work/**", "action": "allow" }` and segment is `cp /Users/me/work/a.txt /Users/me/work/b.txt /Users/me/work/dest/`
