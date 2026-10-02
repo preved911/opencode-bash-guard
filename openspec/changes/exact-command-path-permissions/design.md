@@ -1,104 +1,68 @@
 ## Context
 
-See [proposal.md](proposal.md) for motivation. `ArgMatcher.action` is currently required by the TypeScript model and validation. `evalMatcher` walks nested `args` by appending both a matching parent action and every matching child action to one shared action list. `mostRestrictive` then applies deny, ask, allow precedence across that entire list.
-
-That behavior makes nesting an accumulating policy chain instead of a command path. For example, a matching `git` `push` branch can contribute its action even when the command does not reach a configured leaf, and a child action can combine with the parent action. The evaluator also keeps a consumed-token state for token matching, short-flag clusters, flag values, and positional candidates. `resolveSegment` treats a non-null args result as authoritative and otherwise falls through to bash glob, external-directory, and redirect policy. Degraded mode bypasses args matching and forces ask before that pipeline.
+See [proposal.md](proposal.md) for motivation. Today `evalMatcher` walks nested `args` trees and appends the action of every matched matcher — ancestors and descendants alike — to one shared list; `mostRestrictive` then reduces the whole list. Three consequences: an ancestor `deny` always wins, so allow exceptions under it are dead config; the action on a matcher that has `args` has no coherent meaning (it either uselessly joins the accumulation or would silently vanish under exact-path semantics); and nothing in the config tells the reader which rule actually decided a command. Global flags (`git -c …`, cobra persistent flags that may appear on either side of the subcommand) and "restrict this flag everywhere" rules have no clean story either.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- Represent a recursive match as one selected command-path result, not a global collection of actions from ancestor and descendant nodes.
-- Resolve conflicts only among alternatives that match at the same recursion level, with deny winning over ask and allow.
-- Make an omitted matcher action become `ask` during configuration validation, so runtime matching receives a complete internal matcher tree.
-- Keep current token, pattern, positional, clustered-flag, flag-value consumption, and degraded-mode behavior unless the exact-path rule requires otherwise.
-- Preserve the existing segment pipeline: a path result decides the segment, while no path result falls through to the current glob and path policy.
+- One rule = one command path, readable on a single line: `token: ["push", "--force"]`.
+- Overrides in both directions via refinement; most-restrictive-wins for genuine ambiguity — with `ask` as a full participant, not only `deny`.
+- Global flags and reordered arguments match the same rule as the canonical order.
+- Flat-argument tools (`find`, `grep`) keep released behavior.
+- Fail-safe defaults: no rule silently vanishes, and no rule is silently loosened by an unrelated one.
 
 **Non-Goals:**
 
-- Change bash glob precedence, external-directory evaluation, redirects, chain-level aggregation, or permission wrapping.
-- Add a compatibility switch for accumulated nested actions or change declaration-order semantics.
-- Redefine tokenization, positional heuristics, short-flag expansion, or `position: "all"` quantifiers.
-- Add dependencies or change the plugin config loading and merge model.
+- No flag-name prefix matching: `--force` never matches `--force-with-lease`.
+- No consecutive-position path semantics; paths are order-free.
+- No changes to position-matcher mechanics, the glob fallback, chain aggregation, permission wrapping, or degraded mode.
+- No new dependencies; no changes to plugin config loading or merging.
 
 ## Decisions
 
-### Normalize matcher actions at the validation boundary
+### Flatten matcher trees into path matchers
 
-`ArgMatcher.action` will become optional in the raw configuration shape. Validation will copy each accepted matcher into a normalized internal matcher tree where `action` is always present. A missing action becomes `ask`; an explicitly invalid action still invalidates the containing permission entry under the current warning and drop behavior. Recursive children are normalized using the same function.
+`ArgMatcher.token` becomes `string | string[]`; nested `args` is removed from the schema — declaring it invalidates the entry, which is dropped with a warning naming it (migration is a mechanical flatten, see below). A path matches when every element matches a distinct segment token: elements are consumed in array order from the matcher's own evaluation, each anywhere among the remaining tokens, so `[ "get", "--namespace=kube-system" ]` matches `kubectl get --namespace=kube-system pods` and `kubectl --namespace=kube-system get pods` alike. Elements match whole tokens exactly, and leftover trailing tokens never invalidate a match — `["push", "--force"]` fires on `git push --force origin main`. Matchers are evaluated independently of each other; no matcher consumes tokens on behalf of another. This removes the shared-state machinery entirely and makes evaluation recursion-free, so configuration depth costs nothing at runtime.
 
-This makes omission deterministic before matching begins and keeps evaluator code independent of configuration syntax. It also means the parser can validate a nested tree once, rather than repeatedly applying defaults at every recursion level.
+Alternative considered: keep nested trees with exact-path selection (a branch consumes its token, returns only its child's result, an unmatched branch falls through to the glob level). Rejected: branch actions become inert, unmatched prefixes silently loosen configured denies by delegating to the glob level, and the evaluator stays stateful and recursive.
 
-Alternative considered: default missing actions inside the evaluator. Rejected because validation would still reject omitted actions or the evaluator would need to handle partially valid runtime data. Boundary normalization gives one internal contract.
+Alternative considered: branch actions as inherited defaults (longest-prefix inheritance on the tree). Rejected: it expresses the same outcomes as prefix path rules with a stateful evaluator; the flat form states the inheritance explicitly — a prefix rule is just a shorter path.
 
-### Split leaf matchers from branch matchers
+### Decide overlaps by refinement, then most-restrictive
 
-A matcher without `args` is a leaf. If it matches according to its existing token or position semantics, it yields that matcher's normalized action.
+Matching matchers resolve as follows. First, discard every matcher another matching matcher *refines*: A refines B iff both are token matchers and either (1) B's token path is a proper element-prefix of A's token path — a longer path describes a narrower command; or (2) A and B declare the same single-string token and A adds a `pattern` B lacks — a value-constrained matcher describes a narrower command set. Second, reduce the survivors most-restrictive: `deny` > `ask` > `allow`, regardless of declaration order. Position matchers never refine and are never refined; incomparable matchers — including any matcher against a position matcher, or two different same-length paths — always reduce together most-restrictive.
 
-A matcher with `args` is a branch selector. It can only participate after its own `token` matches and consumes that token in a copied matcher state. Its own action is not a decision for the command. The evaluator recurses into its children using that copied state and returns only the selected child result. A branch with no matching child produces no result.
+The split matches intent: refinement means "this rule describes the command more precisely" and wins in whichever direction it points (a refined `allow` beats a general `deny`; a refined `deny` or `ask` beats a general `allow`); MRW resolves genuine ambiguity and always errs toward restriction, so a global-flag `deny` or `ask` (`["--force"] → deny`) can never be silently defeated by an unrelated exact-path `allow`, and `ask` survives the same way.
 
-Consequently, a configured branch such as `git` then `push` applies only to a complete matched path. `git`, `git status`, and `git push --force` do not inherit an ancestor branch action unless each command reaches a matching leaf. A leaf may still have no `pattern`, preserving current token-only leaf matching. Validation continues to reject the currently unsupported `token` plus `pattern` plus `args` combination, so branches remain command-token selectors rather than flag-value rules.
+Alternative considered: pure longest-path-wins. Rejected: a bare global-flag rule loses to any longer allow — "deny this flag everywhere" silently fails exactly when an allowed subcommand exists. Alternative considered: global most-restrictive only (today's accumulation). Rejected: allow exceptions are inexpressible, which is the bug this change fixes.
 
-Alternative considered: let a branch action act as a default when no child matches. Rejected because it preserves ancestor inheritance and conflicts with exact command-path semantics.
+### Default omitted actions to ask at the validation boundary
 
-### Return a local recursive selection result
+`action` becomes optional in the raw configuration shape. Validation normalizes each accepted matcher so `action` is always present; an omitted action becomes `ask` — never allow. An explicitly invalid action still invalidates the containing entry under the current warning-and-drop behavior. The evaluator never sees a partially specified matcher.
 
-Replace the recursive `actions: PermissionAction[]` accumulator with an internal result such as `MatcherResult | null`. A result contains the action selected by one complete leaf path. The recursive function continues to receive `argv` and `MatcherEvalState`, including the copied consumption state used for a branch.
+### Keep `pattern` bound to single-token value matching
 
-At each matcher-array level, evaluate every sibling independently from the state supplied to that level. Collect only each sibling's returned result. Reduce that local result set with the existing action precedence: deny, then ask, then allow. Return the resulting one action to the caller. A branch returns the action chosen by its child level without combining it with the branch's own action.
+`pattern` stays required with `position` and optional with a single-string `token` (globbing the value token that follows the matched flag). `pattern` combined with an array `token` is invalid and warns-and-drops: value matching is a per-flag concern, paths are token selectors, and per-element value constraints would add consumption semantics with no demonstrated need. Refinement by pattern covers the value-exception case (`{ "token": "-X", "pattern": "GET", "action": "allow" }` refines `{ "token": "-X", "action": "deny" }`).
 
-The root `entry.args` level uses the same local reduction. `evalToolEntry` returns its one action or null, and `matchToolActions` keeps combining completed tool-entry results as it does today. Thus deny-wins remains true for alternatives at one recursion level and for multiple matching tool entries, but it is not least-privilege aggregation over an ancestor-to-descendant chain.
+### Keep everything outside matcher evaluation unchanged
 
-Alternative considered: preserve the shared action array and suppress only parent actions. Rejected because child siblings would still write into a global collection, making recursion boundaries invisible and easy to regress. A scalar recursive return makes the selected-path contract explicit.
+No matching rule → the existing glob, external-directory, and redirect pipeline decides, exactly as released. Args-level `allow` still records the force-allow decision consumed by `permission.ask`; `ask` and `deny` wrap and store as before; `resolveChain` still aggregates segments with deny over ask. Broken JSONC still enters degraded mode before matching. Clustered short-flag expansion, case sensitivity, positional-slot counting, and the `position: "all"` fail-safe quantifiers are unchanged.
 
-### Preserve matching and consumption mechanics within a selected path
+### Test at the existing boundaries
 
-Leaf matching keeps existing behavior:
-
-- Exact token matching remains case-sensitive. Single-letter short-flag targets still match inside clustered flags, while value-pattern matchers still require an exact flag token.
-- A token matcher with a value pattern consumes the flag and its value in the current state. A token-only leaf consumes its matched token.
-- Numeric positions and `position: "all"` retain their existing candidate rules and allow versus ask or deny quantifiers.
-- A selected branch receives a copied state with its selector token consumed. Its descendants cannot rematch that selector. Siblings at the parent level evaluate against the parent state, so no sibling inherits another sibling's consumption.
-
-The recursive algorithm has no level-specific condition or fixed nesting limit. Every branch calls the same matcher-array evaluator for its children, so configuration depth is bounded only by the supplied tree and normal runtime stack limits.
-
-Alternative considered: flatten nested matchers into fixed two or three token levels. Rejected because it would cap valid command paths and duplicate matching rules for every depth.
-
-### Keep unmatched paths on the existing fallback pipeline
-
-`matchToolPermissions` returns null when no complete leaf path matches. This includes an unmatched branch prefix, a branch whose descendants do not match, and a sibling that does not match. `resolveSegment` then continues unchanged into bash glob matching, path extraction, external-directory checks, and redirect checks.
-
-This preserves the current boundary between structured args policy and the native glob policy. It also prevents a partial structured rule from becoming an implicit deny or ask for unrelated subcommands.
-
-Alternative considered: return ask for every matched branch prefix. Rejected because it turns incomplete structured paths into policy decisions and blocks the configured glob fallback.
-
-### Keep enforcement and degraded behavior unchanged
-
-After an args-level path selects allow, ask, or deny, `resolveSegment` continues to treat that result as authoritative. Args-level allow still records the force-allow decision needed by `permission.ask`; args ask and deny still wrap and store as before. `resolveChain` still aggregates segment decisions with deny over ask, and all segments must allow for a chain allow.
-
-Invalid JSONC still enters degraded mode before matching, removes tool permissions, suspends glob allows, and asks for every parseable bash command. Invalid permission entries continue to be warned and dropped without forcing degraded mode. The new omitted-action default applies only to otherwise valid matcher objects.
-
-Alternative considered: make nested-path changes alter chain aggregation or degraded mode. Rejected because neither behavior is part of command-path selection and changing either would widen this breaking change.
-
-### Test the recursive contract at the existing boundaries
-
-Update `tool-permissions.test.ts` to cover omitted action normalization, arbitrary-depth exact paths, a matching branch with no matching leaf, sibling fallthrough, and local deny-wins conflicts. Cases must show that parent and descendant actions do not combine, while overlapping leaves at one array level still reduce to deny.
-
-Keep regression coverage for quoted tokens, clustered flags, values, positions, `position: "all"`, consumption, multiple entries, glob fallback, args force-allow, and degraded mode. These tests protect the behavior intentionally preserved by the design.
+Update `plugin-config.test.ts` for array tokens, omitted-action normalization, legacy `args` dropped with warnings, and `pattern`-with-array invalidity. Update `tool-permissions.test.ts` for order-free path matching, trailing-argument coverage, distinct-token consumption inside a path, whole-token elements, refinement discard in both directions, global-flag `ask`/`deny` surviving exact-path allows, and MRW ties. Preserve the flat regression suite: flat tools must behave exactly as released, except the intended value-exception case where a `pattern` matcher now refines its bare token instead of hiding behind MRW.
 
 ## Risks / Trade-offs
 
-- [Existing nested configurations rely on parent actions applying to descendants] → This is a documented breaking change. Migration requires explicit leaf rules for every intended command path.
-- [A local deny is mistaken for a chain-wide ancestor restriction] → Tests will pair conflicting parent and child actions and assert that only sibling alternatives at the same recursion level are reduced together.
-- [State copying changes consumption visibility] → Keep the current branch-copy rule, and add tests that prove descendants cannot rematch a branch selector while siblings remain independent.
-- [Deep user configuration can grow the call stack] → The evaluator supports arbitrary logical depth without a configured cap. Typical command paths are shallow, and no new traversal is introduced beyond the existing recursive tree walk.
-- [Omitted actions silently become more restrictive than prior invalid-entry dropping] → Default to `ask`, never allow, and cover the normalization behavior with parser tests and warning expectations for explicit invalid values.
-- [The breaking semantic change is hard to notice] → Document it in the modified capability spec and release notes, with before and after examples that require explicit leaves.
+- [A refinement can loosen a broader deny] → That is the feature (exceptions), and it requires a visible, specific rule; blanket rules keep covering every unlisted path. Release notes must state that overlapping rules resolve to the more specific one, even when looser.
+- [Value-exception behavior differs from the release for overlapping pattern/bare matchers] → Documented; previously the bare rule always hid the pattern rule via MRW. Flat tools are otherwise bit-identical.
+- [Users expect length-based precedence between unrelated rules] → Document the lineage rule: generality never beats specificity across lineages because incomparable rules go to MRW, which is always fail-safe.
+- [Flattened trees change some outcomes] → Old accumulation equals the new reduction except allow leaves that were dead under deny-accumulation now act as the exceptions they were written to be; the migration note leads with this.
+- [Omitted actions silently restrict] → Default is `ask`, never allow; normalization is covered by parser tests.
 
 ## Migration Plan
 
-1. Implement normalization and recursive local-result selection behind the existing `permissions` schema. No new option or dependency is added.
-2. Update unit and pipeline tests to establish the exact-path contract and protect unchanged behavior.
-3. Update the `args-permission-matching` specification and user-facing configuration documentation to mark nested behavior as breaking. Show that ancestor rules must be expanded into explicit leaves and that omitted matcher actions now default to `ask`.
-4. Release as a breaking version. Users review nested `args` trees and add explicit leaf matchers for every command path they previously expected an ancestor action to cover.
-5. Roll back by releasing the prior plugin version if users cannot migrate immediately. There is no runtime compatibility mode, because supporting both accumulated and exact-path interpretation would make the same configuration ambiguous.
+1. Flatten: replace each nested tree with one rule per root-to-leaf path (`token: [a, b, c]`, leaf action); re-express a desired intermediate action as an explicit prefix rule (`token: [a, b]`).
+2. Release as a breaking version. Deny rules keep covering every nested path they covered; allow leaves previously dead under deny-accumulation now take effect.
+3. Roll back by releasing the prior plugin version; there is no compatibility mode — one syntax, one semantics.

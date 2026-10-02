@@ -1,27 +1,23 @@
 ## 1. Regression Tests
 
-- [ ] 1.1 Add `src/__tests__/plugin-config.test.ts` cases that accept omitted matcher actions at every nesting level, normalize them to `ask`, and still drop entries with explicit invalid actions while warning.
-- [ ] 1.2 Add `src/__tests__/tool-permissions.test.ts` cases for exact arbitrary-depth token paths that return the complete leaf action and do not decide on a matched ancestor prefix or unmatched descendant.
-- [ ] 1.3 Add `src/__tests__/tool-permissions.test.ts` cases that let an unmatched nested branch fall through to a matching sibling and then to existing bash glob, external-directory, and redirect evaluation when no leaf path matches.
-- [ ] 1.4 Add `src/__tests__/tool-permissions.test.ts` cases that prove a branch action does not combine with its selected leaf, while overlapping matching leaves at the same recursion level reduce with local deny-wins precedence.
-- [ ] 1.5 Preserve and run regression coverage in `src/__tests__/tool-permissions.test.ts` for quoted tokens, short-flag clusters, flag values, positional matching, `position: "all"`, token consumption, multiple tool entries, args force-allow, glob fallback, and degraded mode.
+- [ ] 1.1 Preserve the flat-matcher regression suite in `src/__tests__/tool-permissions.test.ts`: quoted tokens, short-flag clusters, flag values, positional matching, `position: "all"`, multiple tool entries, args force-allow, glob fallback, and degraded mode. Flat tools (`find`, `grep`) must behave exactly as released.
+- [ ] 1.2 Add `src/__tests__/plugin-config.test.ts` cases: array `token` parses into a path matcher; omitted `action` normalizes to `ask`; legacy nested `args`, and `pattern` combined with an array `token`, are dropped with a warning naming the entry.
 
-## 2. Configuration Normalization
+## 2. Configuration Types and Validation
 
-- [ ] 2.1 Update raw and normalized matcher types in `src/config.ts` so config input may omit `action` but evaluated matchers always have a valid `PermissionAction`.
-- [ ] 2.2 Refactor `validateToolPermissions` in `src/config.ts` to recursively normalize accepted matcher trees, default each omitted action to `ask`, and retain warning-and-drop handling for invalid entries.
+- [ ] 2.1 Update raw and normalized matcher types in `src/config.ts`: `token: string | string[]` (non-empty array of strings), `action?: PermissionAction`, no nested `args`; `pattern` stays bound to `position` or a single-string `token`.
+- [ ] 2.2 Update `validateToolPermissions` in `src/config.ts` to normalize omitted actions to `ask` and drop legacy/invalid entries with a warning naming them.
 
-## 3. Exact Path Evaluation
+## 3. Evaluation
 
-- [ ] 3.1 Refactor recursive matcher evaluation in `src/config.ts` to return one local leaf-path result or no result instead of appending ancestor and descendant actions to a shared accumulator.
-- [ ] 3.2 Make branch matchers in `src/config.ts` consume their selector in a copied matcher state, recurse into children, and return only a selected child result, leaving unmatched branches without a decision.
-- [ ] 3.3 Reduce only matching sibling results at each recursion level in `src/config.ts` with existing deny, ask, allow precedence, then preserve top-level tool-entry aggregation behavior.
-- [ ] 3.4 Keep `resolveSegment` and its existing permission pipeline in `src/config.ts` unchanged for no-result paths so glob, external-directory, redirect, and degraded-mode behavior remain intact.
+- [ ] 3.1 Implement independent per-matcher evaluation in `src/config.ts`: string tokens keep released mechanics (exact match, cluster expansion, value consumption); an array token matches order-free — each element consumes a distinct unconsumed token in array order, anywhere in the segment — and trailing tokens never invalidate a match.
+- [ ] 3.2 Implement overlap resolution in `src/config.ts`: discard matchers refined by another matching matcher (path-prefix extension, or a value-constrained matcher over the same bare token; position matchers never refine), then reduce survivors most-restrictive (`deny` > `ask` > `allow`).
+- [ ] 3.3 Keep `resolveSegment` and its pipeline in `src/config.ts` unchanged for no-match paths so glob, external-directory, redirect, and degraded-mode behavior remain intact.
 
 ## 4. Documentation
 
-- [ ] 4.1 Update the `permissions` configuration examples in `README.md` to show explicit nested leaf actions, arbitrary-depth exact paths, and omitted actions defaulting to `ask`.
-- [ ] 4.2 Document in `README.md` that nested branch actions do not inherit to prefixes or descendants, same-level alternatives use deny-wins precedence, and users must expand prior ancestor policies into explicit leaves.
+- [ ] 4.1 Rewrite the `permissions` section of `README.md`: path rules, order-free matching, refinement-then-most-restrictive resolution, omitted `action` defaulting to `ask`, with `git`/`kubectl` examples covering subtree denies, flag exceptions, and global-flag rules.
+- [ ] 4.2 Add a migration note to `README.md`: flatten nested `args` trees into path arrays; deny rules keep covering unlisted nested paths; allow leaves previously dead under deny-accumulation now act as exceptions.
 
 ## 5. Verification
 

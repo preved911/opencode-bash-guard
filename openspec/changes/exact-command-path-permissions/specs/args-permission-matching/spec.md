@@ -2,12 +2,17 @@
 
 ### Requirement: Parse permissions rules from the plugin config file
 
-The system SHALL read an optional `permissions` array from the plugin config file `opencode-bash-guard.jsonc` (project `.opencode/` and global opencode config dir, project wins) into typed tool entries `{ tool: string, args: ArgMatcher[] }`. Each arg matcher SHALL declare exactly one of `token: string` or `position: number | "all"`; `pattern: string` is REQUIRED with `position` (globs that positional slot) and OPTIONAL with `token` (when present it globs the value token immediately following the matched flag; when absent the matcher is a bare flag match). A `token` matcher MAY declare nested `args`. A matcher MAY omit `action`; an omitted action SHALL normalize to `"ask"`. When present, `action` MUST be `"allow" | "ask" | "deny"`. Entries failing validation SHALL be dropped with a warning naming them. When the file or section is absent, the parsed rule list SHALL be empty and plugin behavior SHALL be identical to before this change. When the file fails to parse as JSONC, the plugin SHALL enter degraded mode: `permissions` is treated as absent AND glob allows are suspended for that run, every bash segment SHALL resolve to `ask` (parse-error segments still deny), with a warning naming the file, so a broken config can never silently disable `deny` rules that were meant to be active.
+The system SHALL read an optional `permissions` array from the plugin config file `opencode-bash-guard.jsonc` (project `.opencode/` and global opencode config dir, project wins) into typed tool entries `{ tool: string, args: ArgMatcher[] }`. Each arg matcher SHALL declare exactly one of `token: string | string[]` or `position: number | "all"`. An array `token` declares a command path: an ordered list of tokens that must all appear in the segment (matched anywhere; see the matching requirement). `pattern: string` is REQUIRED with `position` (globs that positional slot) and OPTIONAL with a single-string `token` only (when present it globs the value token immediately following the matched flag); `pattern` combined with an array `token` is invalid. Nested `args` trees are no longer part of the schema: a matcher declaring `args` is invalid. A matcher MAY omit `action`; an omitted action SHALL normalize to `"ask"`. When present, `action` MUST be `"allow" | "ask" | "deny"`. Entries failing validation SHALL be dropped with a warning naming them. When the file or section is absent, the parsed rule list SHALL be empty and plugin behavior SHALL be identical to before this change. When the file fails to parse as JSONC, the plugin SHALL enter degraded mode: `permissions` is treated as absent AND glob allows are suspended for that run, every bash segment SHALL resolve to `ask` (parse-error segments still deny), with a warning naming the file, so a broken config can never silently disable `deny` rules that were meant to be active.
 
 #### Scenario: Valid entries parse
 
 - **WHEN** `permissions` contains `{ "tool": "find", "args": [{ "token": "-delete", "action": "ask" }, { "position": 0, "pattern": "/Users/me/work/**", "action": "allow" }] }`
 - **THEN** one tool entry is stored with two validated arg matchers
+
+#### Scenario: Array token parses as a path
+
+- **WHEN** `permissions` contains `{ "tool": "git", "args": [{ "token": ["push", "--force"], "action": "deny" }] }`
+- **THEN** one matcher is stored with a two-element command path and action `deny`
 
 #### Scenario: Omitted action defaults to ask
 
@@ -16,7 +21,7 @@ The system SHALL read an optional `permissions` array from the plugin config fil
 
 #### Scenario: Invalid entries dropped with warning
 
-- **WHEN** `permissions` contains an entry without `tool`, a matcher with both `token` and `position`, a matcher with neither `token` nor `position`, and one with `action: "block"`
+- **WHEN** `permissions` contains an entry without `tool`, a matcher with both `token` and `position`, a matcher with neither `token` nor `position`, one with `action: "block"`, a legacy matcher declaring nested `args`, and a matcher combining `pattern` with an array `token`
 - **THEN** each invalid entry is dropped and a warning names it
 
 #### Scenario: Section absent
@@ -31,12 +36,12 @@ The system SHALL read an optional `permissions` array from the plugin config fil
 
 ### Requirement: Structured arg matcher semantics
 
-The system SHALL match a segment's tokens against arg matchers independently. Tokens SHALL be argv-style and quote-aware, derived from the same AST parse the chain splitter performs, with matched quote pairs stripped (`"--force"` matches as `--force`, `--force""` as `--force`) and quoted whitespace kept within a token (`echo "a b"` yields one arg), so quoting cannot hide a flag from a matcher. Commands whose chain parse failed never reach matcher evaluation (they fail closed earlier). `token` matching SHALL additionally expand clustered short flags: a `token` target of one letter after `-` (e.g. `-f`) SHALL also match a clustered token of single-letter short flags (e.g. `-rf`); other forms are not expanded. A `token` matcher declaring `pattern` (value match) SHALL match only via exact token equality; cluster-expanded matches never apply, and a cluster match never consumes the following token as a value. A cluster-expanded match SHALL NOT consume the token: every single-letter target tests cluster membership independently, so separate matchers can all match the same cluster and their actions aggregate most-restrictive-wins. A `token` matcher matches any unconsumed equal token and consumes it; when it declares `pattern`, the next token must exist and glob-match it (the flag's value) and is consumed too. A `position`+`pattern` matcher matches the N-th **positional** token: tokens after the tool name that do not start with `-`, counted in command order on the original token list (independent of consumption by `token` matchers; consumption affects only nested `args` evaluation). Flags never occupy a positional slot. Heuristic limitation (documented, same class as the `"all"` candidate set): a flag value that does not start with `-` (`find -name x.txt` → `x.txt`) counts as a positional. `position: "all"` is the single variable-arity notation: the candidate set is every remaining unconsumed token that does not start with `-`, and the match quantifier SHALL be derived from `action` so the matcher always fails safe: with `action: "allow"`, every candidate MUST glob-match the pattern (one mismatch or zero candidates means no match); with `action: "ask"` or `"deny"`, at least one candidate glob-matching the pattern is sufficient (zero candidates means no match). Nested `args` SHALL be evaluated only on the remaining tokens after the parent `token` matcher matched, with tokens consumed at deeper levels invisible to shallower matchers. `token` matchers SHALL consume before `position` matchers evaluate. Every matched matcher at the selected evaluation level SHALL contribute its action; no matcher at that level short-circuits another. Nested `token` matchers form command paths of arbitrary depth: an action at a configured leaf applies only when the complete configured hierarchy of parent and descendant tokens matches. Matching a deeper descendant SHALL select that descendant evaluation level and SHALL NOT accumulate actions from its matched ancestors. A path match SHALL NOT authorize or restrict its ancestors, incomplete prefixes, or a sibling path. Tokens following an exact configured hierarchy that are ordinary command arguments, rather than tokens that extend a configured nested hierarchy, SHALL continue to be evaluated by the existing token, value, position, and `"all"` matcher semantics at the selected level.
+The system SHALL match a segment's tokens against arg matchers independently — each matcher is evaluated against the full segment token list on its own, and no matcher consumes tokens on behalf of another. Tokens SHALL be argv-style and quote-aware, derived from the same AST parse the chain splitter performs, with matched quote pairs stripped (`"--force"` matches as `--force`) and quoted whitespace kept within a token (`echo "a b"` yields one arg), so quoting cannot hide a flag from a matcher. Commands whose chain parse failed never reach matcher evaluation (they fail closed earlier). A string `token` matcher matches any equal token and consumes it within its own evaluation; when it declares `pattern`, it SHALL match only via exact token equality and additionally consumes the next token as its value only when that token exists and glob-matches the pattern. `token` matching SHALL additionally expand clustered short flags: a target of one letter after `-` (e.g. `-f`) SHALL also match a clustered token of single-letter short flags (e.g. `-rf`); other forms are not expanded, and cluster-expanded matches never consume a following value. An array `token` declares a command path: its elements SHALL match in array order, each against any distinct unconsumed token of the segment, so the command's own token order is irrelevant and global flags match wherever they appear (`["get", "--namespace=kube-system"]` matches `kubectl get --namespace=kube-system pods` and `kubectl --namespace=kube-system get pods`). Elements match by exact whole-token equality; a path element never prefix-matches a longer token (`["push", "--force"]` does not match `--force-with-lease`). All elements MUST match for the path to match, and leftover trailing tokens do not invalidate a match (`["push", "--force"]` matches `git push --force origin main`). A `position`+`pattern` matcher matches the N-th **positional** token: tokens after the tool name that do not start with `-`, counted on the original token list independent of every other matcher. Flags never occupy a positional slot; a flag value without a dash counts as a positional (documented heuristic limitation). `position: "all"` is the single variable-arity notation: its candidates are the tokens that do not start with `-`, and its quantifier SHALL be derived from `action` so the matcher always fails safe: with `action: "allow"`, every candidate MUST glob-match the pattern (one mismatch or zero candidates means no match); with `action: "ask"` or `"deny"`, at least one candidate glob-matching the pattern is sufficient (zero candidates means no match). Matching is case-sensitive. Commands whose chain parse failed never reach matcher evaluation (they fail closed earlier).
 
 #### Scenario: Quoted flag cannot bypass a deny
 
-- **WHEN** tool entry is `git` with nested `push` → `{ "token": "--force", "action": "deny" }` and segment is `git push "--force" origin main`
-- **THEN** the token is argv-style `--force` (quotes stripped) and the matcher matches; quoting does not bypass the deny
+- **WHEN** tool entry is `git` with `{ "token": ["push", "--force"], "action": "deny" }` and segment is `git push "--force" origin main`
+- **THEN** the token is argv-style `--force` (quotes stripped) and the path matches — quoting does not bypass the deny
 
 #### Scenario: Clustered short flags match single-letter targets
 
@@ -46,7 +51,7 @@ The system SHALL match a segment's tokens against arg matchers independently. To
 #### Scenario: Cluster matches do not consume — sibling flags still match
 
 - **WHEN** an `rm` entry declares both `{ "token": "-r", "action": "deny" }` and `{ "token": "-f", "action": "ask" }`, and segment is `rm -rf /tmp/x`
-- **THEN** both matchers match the same clustered token (`-rf`) and contribute (`deny`, `ask`); the args-level action is `deny`
+- **THEN** both matchers match the same clustered token independently (matchers never consume on behalf of one another) and contribute (`deny`, `ask`); the args-level action is `deny`
 
 #### Scenario: Token value matchers do not match via cluster expansion
 
@@ -81,7 +86,7 @@ The system SHALL match a segment's tokens against arg matchers independently. To
 #### Scenario: Numeric position counts positional arguments only — flags never shift the index
 
 - **WHEN** a `find` entry declares `{ "token": "-delete", "action": "ask" }` and `{ "position": 0, "pattern": "/tmp/**", "action": "allow" }`, and segments are `find /tmp -delete` and `find -delete /tmp`
-- **THEN** both segments resolve `position: 0` to the first positional `/tmp`; flags (`-delete`) never occupy a positional slot regardless of where they appear; `-delete` also matches its token matcher (`ask`), so both contribute (`ask`, `allow`) and the args-level action is `ask`
+- **THEN** both segments resolve `position: 0` to the first positional `/tmp` — flags (`-delete`) never occupy a positional slot regardless of where they appear; `-delete` also matches its token matcher (`ask`), so both contribute (`ask`, `allow`) and the args-level action is `ask`
 
 #### Scenario: Flag values without a dash count as positionals (heuristic limitation)
 
@@ -138,49 +143,49 @@ The system SHALL match a segment's tokens against arg matchers independently. To
 - **WHEN** matcher is `{ "token": "-X", "pattern": "GET", "action": "allow" }` and segment is `curl -X GET https://api.com`
 - **THEN** the matcher matches (`-X` matched and its value `GET` glob-matches); for `curl -X POST https://api.com` it does not
 
-#### Scenario: Exact arbitrary-depth nested command path
+#### Scenario: Nested subcommand rules
 
-- **WHEN** tool entry is `a` with nested token rules `b` → `c` → `{ "token": "d", "action": "allow" }` and segment is `a b c d`
-- **THEN** the complete configured path matches and its leaf action is `allow`
-
-#### Scenario: Nested path does not match ancestors or siblings
-
-- **WHEN** tool entry is `a` with nested token rules `b` → `c` → `{ "token": "d", "action": "allow" }` and segments are `a`, `a b`, `a b c`, and `a b c e`
-- **THEN** none of the segments receives `allow` from the `a b c d` path
+- **WHEN** tool entry is `git` with `{ "token": ["push", "--force"], "action": "deny" }` and segment is `git push --force origin main`
+- **THEN** the path matches and contributes only `deny`; a path rule is self-contained — there is no ancestor action to accumulate
 
 #### Scenario: Nested rules require the parent token
 
-- **WHEN** tool entry is `git` with `{ "token": "push", "action": "allow", "args": [{ "token": "--force", "action": "deny" }] }` and segment is `git status` or `git commit --force-ish`
-- **THEN** no nested matcher is evaluated; `push` and `--force` do not match
-
-#### Scenario: Nested subcommand rules
-
-- **WHEN** tool entry is `git` with `{ "token": "push", "action": "allow", "args": [{ "token": "--force", "action": "deny" }] }` and segment is `git push --force origin main`
-- **THEN** the deeper `--force` level is selected and contributes only `deny`; the ancestor `push` action does not contribute
-
-#### Scenario: Ordinary trailing arguments retain matcher semantics
-
-- **WHEN** tool entry is `git` has nested token rules `push` → `{ "token": "--force", "action": "deny" }` and a sibling matcher at the `push` level `{ "position": "all", "pattern": "origin", "action": "ask" }`, and segment is `git push origin main`
-- **THEN** `origin` and `main` are ordinary trailing arguments at the matched `push` level; the `position: "all"` matcher evaluates them and contributes `ask`, while the unrelated configured descendant `--force` does not match
+- **WHEN** tool entry is `git` with `{ "token": ["push", "--force"], "action": "deny" }` and segments are `git status`, `git push`, and `git commit --force-ish`
+- **THEN** none match: every path element must be present (`git push` lacks `--force`), and elements match whole tokens exactly (`--force-ish` is not `--force`)
 
 #### Scenario: Consumed tokens are not rematched
 
-- **WHEN** segment is `git push --force` and entry declares both an outer `{ "token": "--force", "action": "ask" }` and the nested `push` → `{ "token": "--force", "action": "deny" }` tree
-- **THEN** `--force` is matched once (nested, `deny`); the outer matcher does not match it again
+- **WHEN** matcher is `{ "token": ["push", "--force", "--force"], "action": "deny" }` and segments are `git push --force origin` and `git push --force --force`
+- **THEN** the first does not match (path elements consume distinct tokens — two `--force` elements require two `--force` tokens); the second matches
+
+#### Scenario: Path matches regardless of argument order
+
+- **WHEN** matcher is `{ "token": ["get", "--namespace=kube-system"], "action": "deny" }` on tool `kubectl`, and segments are `kubectl get --namespace=kube-system pods` and `kubectl --namespace=kube-system get pods`
+- **THEN** both match: path elements consume distinct unconsumed tokens in array order, anywhere in the segment
+
+#### Scenario: Path rule covers trailing arguments
+
+- **WHEN** matcher is `{ "token": ["push", "--force"], "action": "deny" }` and segment is `git push --force origin main`
+- **THEN** the path matches and contributes `deny` — leftover ordinary arguments never invalidate a match
+
+#### Scenario: Path with separate-token flag value
+
+- **WHEN** matcher is `{ "token": ["get", "--namespace", "kube-system"], "action": "deny" }` and segments are `kubectl get --namespace kube-system pods` and `kubectl get --namespace default pods`
+- **THEN** the first matches (elements `get`, `--namespace`, `kube-system` all present) and the second does not (`kube-system` absent)
 
 ### Requirement: Most-restrictive-wins among matched args rules
 
-When one or more arg matchers match at the same evaluation level, the segment's args-level action SHALL be the most restrictive among actions contributed at that level (`deny` > `ask` > `allow`), regardless of declaration order. Deny-wins applies only among simultaneously matching sibling rules at the same evaluation level. A deeper matched descendant selects its evaluation level; actions from its matched ancestors SHALL NOT be accumulated with that descendant action. If no matcher matches, the segment SHALL have no args-level opinion.
+When one or more matchers match a segment, matching matchers that are REFINED by another matching matcher SHALL first be discarded, and the segment's args-level action SHALL be the most restrictive among the remaining actions (`deny` > `ask` > `allow`), regardless of declaration order. Matcher A refines matcher B only when both are token matchers and either B's token path is a proper element-prefix of A's token path (a longer path describes a narrower command), or A and B declare the same single-string token and A declares a `pattern` where B does not (a value-constrained matcher describes a narrower command set). Refinement wins in whichever direction it points: a refined general rule is discarded even when it was more restrictive, and a refined specific rule overrides the general one. Position matchers never refine and are never refined; incomparable matchers — including any token matcher against a position matcher, or two different paths of equal length — SHALL reduce together most-restrictive-wins, so a global-flag `deny` or `ask` can never be silently defeated by an unrelated exact-path `allow`. If no matcher matches, the segment SHALL have no args-level opinion.
 
 #### Scenario: Ask wins over allow
 
 - **WHEN** segment `find /Users/me/work/logs -delete` matches both `-delete → ask` and position-0 `allow` matchers
-- **THEN** the args-level action is `ask`
+- **THEN** the matchers are incomparable (position matchers never refine) and the args-level action is `ask`
 
 #### Scenario: Deny wins over ask
 
-- **WHEN** segment `git push --force-with-lease` matches sibling nested `--force-with-lease → allow` and `--force* → deny` matchers at the `push` level
-- **THEN** the args-level action is `deny`
+- **WHEN** segment `find /etc/cron -delete` matches `{ "token": "-delete", "action": "deny" }` and `{ "position": "all", "pattern": "/etc/**", "action": "ask" }`
+- **THEN** the matchers are incomparable and the args-level action is `deny`
 
 #### Scenario: Single match decides
 
@@ -191,3 +196,23 @@ When one or more arg matchers match at the same evaluation level, the segment's 
 
 - **WHEN** segment `find /tmp -type f` matches no matcher of the `find` entry
 - **THEN** the segment has no args-level opinion
+
+#### Scenario: Refined prefix rule is discarded
+
+- **WHEN** a `git` entry declares `{ "token": ["push"], "action": "deny" }` and `{ "token": ["push", "--force"], "action": "ask" }`, and segment is `git push --force`
+- **THEN** the `["push"]` rule is refined by the `["push", "--force"]` rule and discarded; the args-level action is `ask` — not the most-restrictive `deny`
+
+#### Scenario: Refinement can loosen — allow exception under deny
+
+- **WHEN** a `git` entry declares `{ "token": ["push"], "action": "deny" }` and `{ "token": ["push", "--force-with-lease"], "action": "allow" }`, and segments are `git push --force-with-lease origin` and `git push origin`
+- **THEN** the first segment resolves to `allow` (the refined rule overrides the deny), and the second to `deny` (the prefix rule still covers every unlisted path)
+
+#### Scenario: Global flag ask survives an exact-path allow
+
+- **WHEN** a `kubectl` entry declares `{ "token": ["get", "pods"], "action": "allow" }` and `{ "token": ["--namespace=kube-system"], "action": "ask" }`, and segment is `kubectl get pods --namespace=kube-system`
+- **THEN** neither rule refines the other (the bare-flag path is not a prefix of the exact path), so both reduce most-restrictive-wins and the args-level action is `ask`
+
+#### Scenario: Value-constrained matcher refines its bare token
+
+- **WHEN** a `curl` entry declares `{ "token": "-X", "action": "deny" }` and `{ "token": "-X", "pattern": "GET", "action": "allow" }`, and segments are `curl -X GET https://api.com` and `curl -X POST https://api.com`
+- **THEN** the first resolves to `allow` (the pattern rule refines the bare token and overrides it), and the second to `deny` (the pattern does not match, only the bare rule remains)
