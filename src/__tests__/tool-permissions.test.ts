@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach } from "vitest";
 import {
   validateToolPermissions,
   matchToolPermissions,
-  evalToolEntry,
   matchTokenPattern,
 } from "../config.js";
 import { parseChain, stripQuotePairs } from "../chain.js";
@@ -34,23 +33,39 @@ describe("validateToolPermissions", () => {
     expect(messages).toHaveLength(0);
   });
 
+  it("accepts array token paths and normalizes omitted actions to ask (spec: array token parses, omitted action defaults to ask)", () => {
+    const messages: string[] = [];
+    const entries = validateToolPermissions(
+      [
+        { tool: "git", args: [{ token: ["push", "--force"], action: "deny" }] },
+        { tool: "find", args: [{ token: "-delete" }] },
+      ],
+      warn(messages),
+    );
+    expect(entries).toHaveLength(2);
+    expect(entries[0].args[0].token).toEqual(["push", "--force"]);
+    expect(entries[1].args[0].action).toBe("ask");
+    expect(messages).toHaveLength(0);
+  });
+
   it("drops invalid entries with warnings (spec: invalid entries dropped)", () => {
     const messages: string[] = [];
     const entries = validateToolPermissions(
       [
         { args: [{ token: "-x", action: "deny" }] },
         { tool: "git", args: [{ token: "-x", position: 0, action: "deny" }] },
-        { tool: "git", args: [{ token: "-x" }] },
-        { tool: "git", args: [{ token: "-x", action: "block" }] },
         { tool: "git", args: [{ position: -1, pattern: "a", action: "deny" }] },
         { tool: "git", args: [{ position: 0, action: "deny" }] },
         { tool: "git", args: [{ token: "-x", pattern: "y", args: [{ token: "z", action: "deny" }], action: "deny" }] },
+        { tool: "git", args: [{ token: "-x", action: "block" }] },
+        { tool: "git", args: [{ token: ["push"], pattern: "y", action: "deny" }] },
+        { tool: "git", args: [{ token: [], action: "deny" }] },
         "not-an-object",
       ],
       warn(messages),
     );
     expect(entries).toHaveLength(0);
-    expect(messages).toHaveLength(8);
+    expect(messages).toHaveLength(9);
   });
 
   it("drops only the invalid entry, keeps valid siblings", () => {
@@ -107,7 +122,7 @@ describe("matchToolPermissions (matcher semantics)", () => {
   });
 
   it("quoted flag is visible to the matcher (no bypass via quotes)", () => {
-    const entry = [{ tool: "git", args: [{ token: "push", action: "allow" as const, args: [{ token: "--force", action: "deny" as const }] }] }];
+    const entry = [{ tool: "git", args: [{ token: ["push", "--force"], action: "deny" as const }] }];
     expect(matchToolPermissions(argvOf('git push "--force" origin main'), entry)).toBe("deny");
   });
 
@@ -172,18 +187,20 @@ describe("matchToolPermissions (matcher semantics)", () => {
     expect(matchToolPermissions(argvOf("dd if=/**"), entry)).toBeNull();
   });
 
-  it("nested rules require the parent token; consumed tokens are not rematched", () => {
+  it("path rules require every element as a whole token (spec: nested rules require the parent token)", () => {
     const entry = [
       {
         tool: "git",
         args: [
-          { token: "push", action: "allow" as const, args: [{ token: "--force", action: "deny" as const }] },
+          { token: ["push", "--force"], action: "deny" as const },
           { token: "--force", action: "ask" as const },
         ],
       },
     ];
     expect(matchToolPermissions(argvOf("git push --force origin main"), entry)).toBe("deny");
     expect(matchToolPermissions(argvOf("git status"), entry)).toBeNull();
+    expect(matchToolPermissions(argvOf("git push"), entry)).toBeNull();
+    expect(matchToolPermissions(argvOf("git commit --force-ish"), entry)).toBeNull();
   });
 
   it("most restrictive wins across matchers and entries", () => {
@@ -198,6 +215,115 @@ describe("matchToolPermissions (matcher semantics)", () => {
     const pushEntry = [{ tool: "git", args: [{ position: 0, pattern: "push", action: "allow" as const }] }];
     expect(matchToolPermissions(argvOf("git push --force"), pushEntry)).toBe("allow");
     expect(matchToolPermissions(argvOf("git -c key=val push --force"), pushEntry)).toBeNull();
+  });
+});
+
+describe("path matchers & refinement (exact command paths)", () => {
+  it("path matches regardless of argument order (global flags)", () => {
+    const entry = [{ tool: "kubectl", args: [{ token: ["get", "--namespace=kube-system"], action: "deny" as const }] }];
+    expect(matchToolPermissions(argvOf("kubectl get --namespace=kube-system pods"), entry)).toBe("deny");
+    expect(matchToolPermissions(argvOf("kubectl --namespace=kube-system get pods"), entry)).toBe("deny");
+    expect(matchToolPermissions(argvOf("kubectl get pods"), entry)).toBeNull();
+  });
+
+  it("path rule covers trailing arguments", () => {
+    const entry = [{ tool: "git", args: [{ token: ["push", "--force"], action: "deny" as const }] }];
+    expect(matchToolPermissions(argvOf("git push --force origin main"), entry)).toBe("deny");
+  });
+
+  it("path with separate-token flag value", () => {
+    const entry = [{ tool: "kubectl", args: [{ token: ["get", "--namespace", "kube-system"], action: "deny" as const }] }];
+    expect(matchToolPermissions(argvOf("kubectl get --namespace kube-system pods"), entry)).toBe("deny");
+    expect(matchToolPermissions(argvOf("kubectl get --namespace default pods"), entry)).toBeNull();
+  });
+
+  it("path elements consume distinct tokens (spec: consumed tokens are not rematched)", () => {
+    const entry = [{ tool: "git", args: [{ token: ["push", "--force", "--force"], action: "deny" as const }] }];
+    expect(matchToolPermissions(argvOf("git push --force --force"), entry)).toBe("deny");
+    expect(matchToolPermissions(argvOf("git push --force origin"), entry)).toBeNull();
+  });
+
+  it("refined prefix rule is discarded (spec: refinement overrides, even toward ask)", () => {
+    const entry = [
+      {
+        tool: "git",
+        args: [
+          { token: ["push"], action: "deny" as const },
+          { token: ["push", "--force"], action: "ask" as const },
+        ],
+      },
+    ];
+    expect(matchToolPermissions(argvOf("git push --force"), entry)).toBe("ask");
+  });
+
+  it("refinement can loosen — allow exception under deny (spec: refinement can loosen)", () => {
+    const entry = [
+      {
+        tool: "git",
+        args: [
+          { token: ["push"], action: "deny" as const },
+          { token: ["push", "--force-with-lease"], action: "allow" as const },
+        ],
+      },
+    ];
+    expect(matchToolPermissions(argvOf("git push --force-with-lease origin"), entry)).toBe("allow");
+    expect(matchToolPermissions(argvOf("git push origin"), entry)).toBe("deny");
+  });
+
+  it("string and array token forms refine each other", () => {
+    const entry = [
+      {
+        tool: "git",
+        args: [
+          { token: "push", action: "deny" as const },
+          { token: ["push", "--force-with-lease"], action: "allow" as const },
+        ],
+      },
+    ];
+    expect(matchToolPermissions(argvOf("git push --force-with-lease"), entry)).toBe("allow");
+    expect(matchToolPermissions(argvOf("git push origin"), entry)).toBe("deny");
+  });
+
+  it("global flag ask survives an exact-path allow (spec: incomparable rules reduce most-restrictive)", () => {
+    const entry = [
+      {
+        tool: "kubectl",
+        args: [
+          { token: ["get", "pods"], action: "allow" as const },
+          { token: ["--namespace=kube-system"], action: "ask" as const },
+        ],
+      },
+    ];
+    expect(matchToolPermissions(argvOf("kubectl get pods --namespace=kube-system"), entry)).toBe("ask");
+    expect(matchToolPermissions(argvOf("kubectl get pods"), entry)).toBe("allow");
+  });
+
+  it("value-constrained matcher refines its bare token (spec: value exception)", () => {
+    const entry = [
+      {
+        tool: "curl",
+        args: [
+          { token: "-X", action: "deny" as const },
+          { token: "-X", pattern: "GET", action: "allow" as const },
+        ],
+      },
+    ];
+    expect(matchToolPermissions(argvOf("curl -X GET https://api.com"), entry)).toBe("allow");
+    expect(matchToolPermissions(argvOf("curl -X POST https://api.com"), entry)).toBe("deny");
+  });
+
+  it("refinement pools across separate tool entries", () => {
+    const entries = [
+      { tool: "git", args: [{ token: ["push"], action: "deny" as const }] },
+      { tool: "git", args: [{ token: ["push", "--force-with-lease"], action: "allow" as const }] },
+    ];
+    expect(matchToolPermissions(argvOf("git push --force-with-lease"), entries)).toBe("allow");
+    expect(matchToolPermissions(argvOf("git push origin"), entries)).toBe("deny");
+  });
+
+  it("omitted action normalizes to ask and restricts (fail-safe default)", () => {
+    const entries = validateToolPermissions([{ tool: "find", args: [{ token: "-delete" }] }]);
+    expect(matchToolPermissions(argvOf("find /tmp -delete"), entries)).toBe("ask");
   });
 });
 

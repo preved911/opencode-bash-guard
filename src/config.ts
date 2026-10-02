@@ -13,11 +13,10 @@ export interface ExternalDirectoryRule {
 export type PermissionAction = "allow" | "ask" | "deny";
 
 export interface ArgMatcher {
-  token?: string;
+  token?: string | string[];
   position?: number | "all";
   pattern?: string;
   action: PermissionAction;
-  args?: ArgMatcher[];
 }
 
 export interface ToolPermissionEntry {
@@ -183,99 +182,103 @@ function tokenMatchesTarget(token: string, target: string): boolean {
   return /^-[a-z]{2,}$/.test(token) && token.includes(target[1]);
 }
 
-interface MatcherEvalState {
-  consumed: boolean[];
-}
-
 function isFlagLike(token: string): boolean {
   return token.startsWith("-");
 }
 
-function evalMatcher(
-  matcher: ArgMatcher,
-  argv: string[],
-  state: MatcherEvalState,
-  actions: PermissionAction[],
-): void {
+/** Token path of a matcher: an array token as-is, a string token as a one-element path. */
+function tokenPath(matcher: ArgMatcher): string[] {
+  return Array.isArray(matcher.token) ? matcher.token : [matcher.token as string];
+}
+
+/**
+ * A refines B when A describes a strictly narrower command set:
+ * - B's token path is a proper element-prefix of A's path (both plain paths), or
+ * - same single-string token and A adds a `pattern` where B has none.
+ * Position matchers never refine and are never refined.
+ */
+function refines(a: ArgMatcher, b: ArgMatcher): boolean {
+  if (a.token === undefined || b.token === undefined) return false;
+  const aPath = tokenPath(a);
+  const bPath = tokenPath(b);
+  if (b.pattern === undefined && bPath.length < aPath.length && bPath.every((element, i) => element === aPath[i])) {
+    return true;
+  }
+  if (!Array.isArray(a.token) && !Array.isArray(b.token) && a.token === b.token) {
+    return a.pattern !== undefined && b.pattern === undefined;
+  }
+  return false;
+}
+
+/** Evaluate one matcher independently against the full argv. Matched tokens consume within this evaluation only. */
+function evalMatcher(matcher: ArgMatcher, argv: string[]): boolean {
   if (matcher.token !== undefined) {
-    if (matcher.args && !matcher.pattern) {
-      // Bare subcommand token with nested rules.
-      for (let i = 0; i < argv.length; i++) {
-        if (state.consumed[i] || !tokenMatchesTarget(argv[i], matcher.token)) continue;
-        actions.push(matcher.action);
-        const nestedState: MatcherEvalState = { consumed: [...state.consumed] };
-        nestedState.consumed[i] = true;
-        for (const nested of matcher.args) {
-          evalMatcher(nested, argv, nestedState, actions);
+    if (Array.isArray(matcher.token)) {
+      // Command path: elements consume distinct unconsumed tokens in array order,
+      // each anywhere among the remaining tokens — command order is irrelevant.
+      const consumed = new Set<number>();
+      for (const element of matcher.token) {
+        let found = -1;
+        for (let i = 0; i < argv.length; i++) {
+          if (!consumed.has(i) && argv[i] === element) {
+            found = i;
+            break;
+          }
         }
-        return;
+        if (found === -1) return false;
+        consumed.add(found);
       }
-      return;
+      return true;
     }
 
     for (let i = 0; i < argv.length; i++) {
-      if (state.consumed[i] || !tokenMatchesTarget(argv[i], matcher.token)) continue;
+      if (!tokenMatchesTarget(argv[i], matcher.token)) continue;
       if (matcher.pattern !== undefined) {
         // Value match: expansion never applies, so the token must equal the target exactly.
         if (argv[i] !== matcher.token) continue;
         const value = argv[i + 1];
-        if (value === undefined || state.consumed[i + 1] || !matchTokenPattern(value, matcher.pattern)) continue;
-        actions.push(matcher.action);
-        state.consumed[i] = true;
-        state.consumed[i + 1] = true;
-        return;
+        if (value === undefined || !matchTokenPattern(value, matcher.pattern)) continue;
+        return true;
       }
-      actions.push(matcher.action);
-      state.consumed[i] = true;
-      return;
+      return true;
     }
-    return;
+    return false;
   }
 
   if (matcher.position !== undefined) {
     if (matcher.position === "all") {
-      const candidates: string[] = [];
-      for (let i = 1; i < argv.length; i++) {
-        if (!state.consumed[i] && !isFlagLike(argv[i])) candidates.push(argv[i]);
-      }
-      if (candidates.length === 0) return;
+      const candidates = argv.slice(1).filter((token) => !isFlagLike(token));
+      if (candidates.length === 0) return false;
       const matched = candidates.filter((token) => matchTokenPattern(token, matcher.pattern!));
       if (matcher.action === "allow") {
-        if (matched.length === candidates.length) actions.push(matcher.action);
-      } else if (matched.length > 0) {
-        actions.push(matcher.action);
+        return matched.length === candidates.length;
       }
-      return;
+      return matched.length > 0;
     }
 
     const positionals = argv.slice(1).filter((token) => !isFlagLike(token));
     const token = positionals[matcher.position];
-    if (token !== undefined && matchTokenPattern(token, matcher.pattern!)) {
-      actions.push(matcher.action);
-    }
+    return token !== undefined && matchTokenPattern(token, matcher.pattern!);
   }
+
+  return false;
 }
 
 /**
- * Evaluate one tool entry's matchers against argv tokens (after the command name).
- * Returns every contributed action — most-restrictive-wins is applied by the caller.
+ * Match a segment's argv tokens against tool permission entries.
+ * Matching matchers refined by another matching matcher are discarded (refinement
+ * picks the most precise description); the survivors reduce most-restrictive-wins
+ * downstream. Refinement pools across every entry matching the tool.
  */
-export function evalToolEntry(argv: string[], entry: ToolPermissionEntry): PermissionAction[] {
-  const actions: PermissionAction[] = [];
-  const state: MatcherEvalState = { consumed: argv.map(() => false) };
-  for (const matcher of entry.args) {
-    evalMatcher(matcher, argv, state, actions);
-  }
-  return actions;
-}
-
 export function matchToolActions(argv: string[], entries: ToolPermissionEntry[]): PermissionAction[] {
-  const actions: PermissionAction[] = [];
+  const matching: ArgMatcher[] = [];
   for (const entry of entries) {
     if (entry.tool !== argv[0]) continue;
-    actions.push(...evalToolEntry(argv, entry));
+    for (const matcher of entry.args) {
+      if (evalMatcher(matcher, argv)) matching.push(matcher);
+    }
   }
-  return actions;
+  return matching.filter((matcher) => !matching.some((other) => other !== matcher && refines(other, matcher))).map((matcher) => matcher.action);
 }
 
 export function mostRestrictive(actions: PermissionAction[]): PermissionAction | null {
@@ -299,19 +302,27 @@ export function validateToolPermissions(raw: unknown, warn: (message: string) =>
 
   const isValidAction = (value: unknown): value is PermissionAction => value === "allow" || value === "ask" || value === "deny";
 
-  const isValidMatcher = (matcher: ArgMatcher): boolean => {
-    const hasToken = typeof matcher.token === "string" && matcher.token.length > 0;
+  const isValidToken = (value: unknown): value is string | string[] => {
+    if (typeof value === "string") return value.length > 0;
+    return Array.isArray(value) && value.length > 0 && value.every((element) => typeof element === "string" && element.length > 0);
+  };
+
+  // Accepts the raw config shape (`action` optional) and returns the normalized matcher.
+  const normalizeMatcher = (input: unknown): ArgMatcher | null => {
+    if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+    const matcher = input as { token?: unknown; position?: unknown; pattern?: unknown; action?: unknown; args?: unknown };
+    const hasToken = isValidToken(matcher.token);
     const hasPosition = matcher.position === "all" || (typeof matcher.position === "number" && Number.isInteger(matcher.position) && matcher.position >= 0);
-    if (hasToken === hasPosition) return false;
-    if (!isValidAction(matcher.action)) return false;
-    if (hasPosition && typeof matcher.pattern !== "string") return false;
-    if (typeof matcher.pattern !== "undefined" && typeof matcher.pattern !== "string") return false;
-    if (hasToken && typeof matcher.pattern === "string" && matcher.args) return false;
-    if (matcher.args) {
-      if (!Array.isArray(matcher.args)) return false;
-      return matcher.args.every(isValidMatcher);
+    if (hasToken === hasPosition) return null;
+    if (matcher.args !== undefined) return null; // legacy nested trees — removed, flatten to path arrays
+    const tokenIsArray = Array.isArray(matcher.token);
+    if (hasPosition && typeof matcher.pattern !== "string") return null;
+    if (typeof matcher.pattern !== "undefined" && (typeof matcher.pattern !== "string" || tokenIsArray)) return null;
+    if (matcher.action === undefined) {
+      return { token: matcher.token as string | string[] | undefined, position: matcher.position as number | "all" | undefined, pattern: matcher.pattern as string | undefined, action: "ask" };
     }
-    return true;
+    if (!isValidAction(matcher.action)) return null;
+    return matcher as ArgMatcher;
   };
 
   for (const item of raw) {
@@ -327,13 +338,14 @@ export function validateToolPermissions(raw: unknown, warn: (message: string) =>
     }
     const matchers: ArgMatcher[] = [];
     let valid = true;
-    for (const matcher of entry.args as ArgMatcher[]) {
-      if (!matcher || typeof matcher !== "object" || !isValidMatcher(matcher)) {
+    for (const matcher of entry.args as unknown[]) {
+      const normalized = normalizeMatcher(matcher);
+      if (normalized === null) {
         warn(`[opencode-bash-guard] Dropping invalid arg matcher for tool "${entry.tool}": ${JSON.stringify(matcher)}`);
         valid = false;
         continue;
       }
-      matchers.push(matcher);
+      matchers.push(normalized);
     }
     if (!valid) continue;
     entries.push({ tool: entry.tool, args: matchers });

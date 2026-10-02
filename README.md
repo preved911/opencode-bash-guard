@@ -117,9 +117,12 @@ opencode's `permission.bash` globs match the whole command string — they canno
 {
   "permissions": [
     {
-      // curl allowed only with -X GET; other curls keep the native ask
+      // curl allowed only with -X GET; other -X uses are denied
       "tool": "curl",
-      "args": [{ "token": "-X", "pattern": "GET", "action": "allow" }]
+      "args": [
+        { "token": "-X", "action": "deny" },
+        { "token": "-X", "pattern": "GET", "action": "allow" }
+      ]
     },
     {
       // find paths under the work tree are allowed, except -delete
@@ -130,15 +133,18 @@ opencode's `permission.bash` globs match the whole command string — they canno
       ]
     },
     {
-      // git push allowed, --force denied (nested under the subcommand token)
+      // push allowed except --force; --force-with-lease allowed (refines the deny)
       "tool": "git",
       "args": [
-        {
-          "token": "push",
-          "action": "allow",
-          "args": [{ "token": "--force", "action": "deny" }]
-        }
+        { "token": ["push"], "action": "allow" },
+        { "token": ["push", "--force"], "action": "deny" },
+        { "token": ["push", "--force-with-lease"], "action": "allow" }
       ]
+    },
+    {
+      // deny `get` against kube-system wherever the flag appears (global flags are order-free)
+      "tool": "kubectl",
+      "args": [{ "token": ["get", "--namespace=kube-system"], "action": "deny" }]
     }
   ]
 }
@@ -149,19 +155,21 @@ Matcher fields:
 | Field | Meaning |
 |---|---|
 | `tool` | command name (first token), case-sensitive |
-| `token` | exact arg token match — a flag (`-delete`) or subcommand (`push`); clustered short flags expand (`-f` matches `-rf`); quoting cannot hide a flag |
-| `position` | `0`-based index over the **positional** tokens (tokens not starting with `-`; flags never occupy a slot) — or `"all"`, the variable-arity form over every remaining positional token |
-| `pattern` | the glob: with `position`, applied to that slot (with `"all"`, every candidate); with `token`, applied to the flag's value (`curl -X GET`) |
-| `action` | `"allow"`, `"ask"`, or `"deny"` |
-| `args` | nested rules, evaluated after the parent `token` matches (subcommand nesting) |
+| `token` | a single token (exact match; clustered short flags expand, `-f` matches `-rf`) **or an array — a command path**: every element must appear as a distinct whole token, anywhere in the command (order-free, so global flags match wherever they sit); trailing arguments never invalidate a match |
+| `position` | `0`-based index over the **positional** tokens (tokens not starting with `-`; flags never occupy a slot) — or `"all"`, the variable-arity form over every positional token |
+| `pattern` | the glob: with `position`, applied to that slot (with `"all"`, every candidate); with a single-string `token`, applied to the flag's value (`curl -X GET`) |
+| `action` | `"allow"`, `"ask"`, or `"deny"` — optional, defaults to `"ask"` |
 
 Precedence rules:
 
-- **Most-restrictive-wins** — every matcher that matches contributes its action; the strictest decides (`deny > ask > allow`). Declaration order is irrelevant.
+- **Refinement wins** — when one matching rule *refines* another (its path extends the other's, or a value `pattern` narrows a bare token), the general rule is discarded and the specific one decides, in whichever direction it points: exceptions under a deny work, and stricter flags under an allow work.
+- **Most-restrictive-wins for everything else** — incomparable matching rules (a global-flag rule vs an exact-path rule, two equal-length paths, position matchers) reduce by strictness (`deny > ask > allow`). A `["--force"] → deny` blanket therefore survives every exact-path `allow`, and `ask` guards the same way.
 - For `position: "all"` the quantifier derives from the action, always failing safe: `allow` requires **every** candidate to match (one unsafe path → no allow); `ask`/`deny` trigger on the **first** match (one sensitive path → restricted).
 - **Args-level `allow` overrides a native ask** (via the plugin's permission hook), so `curl -X GET` genuinely runs without a prompt under a `"*": "ask"` fallback. Args `ask`/`deny` wrap and store as usual.
 
 Fail-safe: a `opencode-bash-guard.jsonc` file that fails to parse puts the plugin into **degraded mode** — args rules are off and glob allows are suspended (every bash command asks) until the file is fixed, so a typo can never silently re-allow a restricted command. Absent file or section = zero behavior change.
+
+**Migrating from nested `args` trees (v0.2.x):** flatten each root-to-leaf chain into one path array with the leaf action — `{ "token": "push", "action": "allow", "args": [{ "token": "--force", "action": "deny" }] }` becomes `{ "token": ["push", "--force"], "action": "deny" }` (plus `{ "token": ["push"], "action": "allow" }` if the prefix was meant to allow). Deny trees keep covering every nested path they covered; allow leaves that were previously dead under deny-accumulation now take effect as the exceptions they were written to be. Nested `args` in a config is rejected with a warning at startup.
 
 
 ## Testing
@@ -177,7 +185,7 @@ All tests are in `src/__tests__/`. Run `npm run test:watch` during development.
 ## Known Limitations
 
 - **Flag-level tokenization heuristics**: tokens starting with `-` are never variable-arity candidates (negative numbers, files named `-myfile` are invisible to `position: "all"`); a dash-less flag value counts as a positional slot (`find -name x.txt` → `x.txt`, `git -c key=val` → `key=val`); matching is case-sensitive (`-X` ≠ `-x`); key=value options are full tokens (`dd if=/dev/sda` needs pattern `if=/dev/**`). For value-sensitive commands prefer `token` + `pattern` (value) matchers, which consume flag values explicitly.
-- **Overlapping args matchers collapse to the strictest action** — an `allow` matcher cannot carve an exception out of an overlapping broader matcher at the args level; narrowing is done by the glob level instead.
+- **Exception carving requires a refinement lineage** — a more specific rule overrides a broader one only when its path extends the other's (or a value `pattern` narrows a bare token); incomparable overlapping rules still collapse to the strictest action.
 - **Broken plugin config degrades to ask-everything**: if `opencode-bash-guard.jsonc` fails to parse, args rules are off and glob allows are suspended — every bash command asks until the file is fixed (a typo can never silently re-allow a restricted command, but unattended/CI sessions will stall on prompts).
 - **Config changes at runtime**: The `config` hook fires once at startup. Config changes require an opencode restart.
 - **Plugin config read once at startup**: `opencode-bash-guard.jsonc` is read once when the plugin initializes. Changes require an opencode restart.
