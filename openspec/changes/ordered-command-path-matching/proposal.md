@@ -6,14 +6,15 @@ The historical nested `args` form did not provide a correct conjunction either â
 
 ## What Changes
 
-- Introduce an explicit token model for every segment: `executable`, command-path levels, flags, flag values, ordinary operands, and operands after `--`. The `=`-form is normalized into a base-flag atom plus an inline value atom, so both spellings behave identically to every policy.
-- Redefine an array `token` as an **ordered, anchored, contiguous command path**: non-dash elements are positional levels matched in order against the leading positional-list operands that follow `<executable>`; dash-prefixed elements are **flag predicates** matching on base flag identity (bare, cluster-expanded, or `=`-form; position-free); a foreign operand before the first level or between levels breaks the match; operands after the complete path are allowed.
-- Ground flag arity in configuration per **executable** (aggregated across all of the tool's entries before matching, explicit `flags` table over value-matcher inference): a value matcher or a `flags: 1` declaration makes the flag consume exactly one following value atomically, unconditionally. An undeclared flag followed by a non-dash token is a **probable missing arity**: the segment resolves to `ask` regardless of the flag's position. Contradictions (a value matcher on a `flags: 0` flag) and equal-rank table conflicts suspend the executable's args policy into scoped ask.
-- Restrict `pattern` to flag tokens: a `token` + `pattern` matcher remains the atomic `<flag>` + `<flag-value>` pair form, with an action-derived repetition quantifier (`allow`: every occurrence; `ask`/`deny`: one suffices). A non-flag token with `pattern` is rejected at validation (warn-and-drop) instead of acting as an implicit command path.
-- Split position semantics into two views: `position` / `position: "all"` index the **positional list** (declared flag values and inline value atoms excluded â€” indices are stable under flag placement), and a new dedicated **operand matcher** (`"operand": "all"`) indexes the **safety operand list** (declared flag values, inline value atoms, post-`--` operands) so `deny`/`ask` policies keep seeing real values everywhere.
+- Introduce an explicit token model for every segment: command-path levels, flags, values, ordinary operands, and operands after `--`. Declared separate and `=` values normalize identically; undeclared `=` spelling is the explicit deterministic exception to separate-form missing-arity handling.
+- Redefine an array `token` as an **ordered, anchored, contiguous command path**. Non-dash elements are positional levels; dash-prefixed elements are position-independent presence predicates. Add an explicit `flagValues` map for atomic path-plus-value predicates instead of silently reinterpreting legacy `--flag=value` array elements.
+- Aggregate flag arity per executable from `flags`, value matchers, and `flagValues`. Any `0`/`1` disagreement suspends the executable into scoped `ask`; no declaration source wins an ambiguous classification. Undeclared flags followed by any non-`--` successor ask. Ambiguous short clusters or attached short values ask rather than being guessed value-less.
+- Use one base-flag identity grammar across scalar flag matchers, array predicates, `flags`, and `flagValues`. Value-bearing `=` spellings are invalid in identity positions; bare scalar flags continue to match classified base-flag atoms, including safely expanded boolean-cluster members.
+- Restrict scalar `pattern` to flag tokens and keep repeated-value quantifiers fail-safe (`allow`: every occurrence; `ask`/`deny`: one suffices). Non-flag `token` + `pattern` remains invalid and has no fake two-matcher migration because independent matchers are not a conjunction.
+- Define two consistent views: `position` indexes ordinary pre-separator operands only, while `operand: "all"` indexes every non-flag data token (ordinary operands, values, and post-`--` operands) as the complete safety view.
 - Invalid permission policies drop the offending rules AND fail closed: a scoped ask for the affected executable, or **global degraded ask** when the entry's tool cannot be determined (e.g. missing `tool`).
-- Keep refinement-then-most-restrictive resolution (strict in at least one dimension: longer path, proper predicate superset, or added value pattern), fail-safe `ask` defaults, the glob fallback for unflagged tools, chain aggregation, and degraded mode unchanged.
-- **BREAKING** Array-token matching becomes anchored and ordered and requires `"matcherVersion": 2` (unmigrated configs ask for affected executables); non-flag `token` + `pattern` matchers are rejected; undeclared value flags resolve segments to `ask`; invalid entries trigger scoped (or global) ask instead of silent fallback; `position` indices no longer count declared flag values (moved to the operand matcher).
+- Keep refinement only where match-set inclusion is structurally proven; different matcher kinds are incomparable and reduce most-restrictive. Preserve fail-safe `ask`, glob fallback for valid unopinionated tools, chain aggregation, and degraded mode.
+- **BREAKING** Every non-empty permissions section requires same-source `matcherVersion: 2`. Unsupported legacy shapes remain scoped-ask until explicitly migrated; opt-in never silently widens an existing allow.
 
 ## Capabilities
 
@@ -23,10 +24,10 @@ None.
 
 ### Modified Capabilities
 
-- `args-permission-matching`: Redefine array-token matching as an ordered, anchored, contiguous command path over an explicit token model; ground flag arity in configuration; restrict `pattern` to flag tokens; align positional matching with the structural positional list.
+- `args-permission-matching`: Redefine array-token matching as an ordered anchored path, add atomic `flagValues`, make arity ambiguity ask, split stable positional indexing from complete safety operands, and version-gate all non-empty permission configs.
 
 ## Impact
 
-- Plugin permission configuration in `opencode-bash-guard.jsonc`: array-token matchers, value matchers on non-flag tokens, `position` matchers counting over dash-less flag values, and any config relying on order-free path matching.
+- Plugin permission configuration in `opencode-bash-guard.jsonc`: every non-empty permissions section, array-token matchers, value-bearing spellings in flag-identity fields, value matchers on non-flag tokens, short-option clusters, position matchers counting over flag values, and configs relying on order-free path matching.
 - User-visible permission outcomes: unsafe matches are removed (fail-closed); order-independence of flags requires declared value flags.
 - The `args-permission-matching` specification, its tests, and the matcher engine implementation in a follow-up change.
