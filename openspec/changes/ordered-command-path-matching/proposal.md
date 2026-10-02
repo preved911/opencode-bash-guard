@@ -13,7 +13,7 @@ The historical nested `args` form did not provide a correct conjunction either â
 - Split position semantics into two views: `position` / `position: "all"` index the **positional list** (declared flag values and inline value atoms excluded â€” indices are stable under flag placement), and a new dedicated **operand matcher** (`"operand": "all"`) indexes the **safety operand list** (declared flag values, inline value atoms, post-`--` operands) so `deny`/`ask` policies keep seeing real values everywhere.
 - Invalid permission policies drop the offending rules AND fail closed: a scoped ask for the affected executable, or **global degraded ask** when the entry's tool cannot be determined (e.g. missing `tool`).
 - Keep refinement-then-most-restrictive resolution (strict in at least one dimension: longer path, proper predicate superset, or added value pattern), fail-safe `ask` defaults, the glob fallback for unflagged tools, chain aggregation, and degraded mode unchanged.
-- **BREAKING** Array-token matching becomes anchored and ordered; non-flag `token` + `pattern` matchers are rejected; undeclared value flags resolve segments to `ask`; invalid entries trigger scoped (or global) ask instead of silent fallback; `position` indices no longer count declared flag values (moved to the operand matcher).
+- **BREAKING** Array-token matching becomes anchored and ordered and requires `"matcherVersion": 2` (unmigrated configs ask for affected executables); non-flag `token` + `pattern` matchers are rejected; undeclared value flags resolve segments to `ask`; invalid entries trigger scoped (or global) ask instead of silent fallback; `position` indices no longer count declared flag values (moved to the operand matcher).
 
 ## Capabilities
 
