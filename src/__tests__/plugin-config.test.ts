@@ -117,6 +117,26 @@ describe("parsePluginConfig", () => {
     const result = parsePluginConfig([file("global.jsonc", content)]);
     expect(result.restructure.enabled).toBe(false);
   });
+
+  it("permissions section parses: path matchers kept, omitted action normalized to ask, legacy entries dropped", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const content = `{
+      "permissions": [
+        { "tool": "git", "args": [
+          { "token": ["push"], "action": "deny" },
+          { "token": ["push", "--force-with-lease"], "action": "allow" }
+        ]},
+        { "tool": "find", "args": [{ "token": "-delete" }] },
+        { "tool": "legacy", "args": [{ "token": "push", "args": [{ "token": "--force", "action": "deny" }] }] }
+      ]
+    }`;
+    const result = parsePluginConfig([file("global.jsonc", content)]);
+    expect(result.degraded).toBe(false);
+    expect(result.toolPermissions).toHaveLength(2);
+    expect(result.toolPermissions[0].args[1].action).toBe("allow");
+    expect(result.toolPermissions[1].args[0].action).toBe("ask");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("legacy"));
+  });
 });
 
 describe("loadRestructureConfig", () => {
