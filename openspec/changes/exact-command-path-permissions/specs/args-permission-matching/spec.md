@@ -43,7 +43,7 @@ The system SHALL match a segment's tokens against arg matchers independently. To
 - **WHEN** matcher is `{ "tool": "rm", "args": [{ "token": "-f", "action": "deny" }] }` and segment is `rm -rf /tmp/x`
 - **THEN** the clustered token `-rf` expands for matching and `-f` matches, contributing `deny`
 
-#### Scenario: Cluster matches do not consume, sibling flags still match
+#### Scenario: Cluster matches do not consume — sibling flags still match
 
 - **WHEN** an `rm` entry declares both `{ "token": "-r", "action": "deny" }` and `{ "token": "-f", "action": "ask" }`, and segment is `rm -rf /tmp/x`
 - **THEN** both matchers match the same clustered token (`-rf`) and contribute (`deny`, `ask`); the args-level action is `deny`
@@ -63,7 +63,7 @@ The system SHALL match a segment's tokens against arg matchers independently. To
 - **WHEN** matcher is `{ "token": "-delete", "action": "ask" }` and segment is `find /tmp -name "*.log" -delete`
 - **THEN** the matcher matches and contributes `ask`
 
-#### Scenario: Flag not present, no match
+#### Scenario: Flag not present — no match
 
 - **WHEN** matcher is `{ "token": "-delete", "action": "ask" }` and segment is `find /tmp -name "*.log"`
 - **THEN** the matcher does not match
@@ -78,7 +78,7 @@ The system SHALL match a segment's tokens against arg matchers independently. To
 - **WHEN** matcher is `{ "position": 0, "pattern": "/Users/me/work/**", "action": "allow" }` and segment is `find /tmp -type f`
 - **THEN** the matcher does not match
 
-#### Scenario: Numeric position counts positional arguments only, flags never shift the index
+#### Scenario: Numeric position counts positional arguments only — flags never shift the index
 
 - **WHEN** a `find` entry declares `{ "token": "-delete", "action": "ask" }` and `{ "position": 0, "pattern": "/tmp/**", "action": "allow" }`, and segments are `find /tmp -delete` and `find -delete /tmp`
 - **THEN** both segments resolve `position: 0` to the first positional `/tmp`; flags (`-delete`) never occupy a positional slot regardless of where they appear; `-delete` also matches its token matcher (`ask`), so both contribute (`ask`, `allow`) and the args-level action is `ask`
@@ -88,17 +88,17 @@ The system SHALL match a segment's tokens against arg matchers independently. To
 - **WHEN** matcher is `{ "position": 0, "pattern": "/Users/me/work/**", "action": "allow" }` and segment is `find -name x.txt`
 - **THEN** `x.txt` (the `-name` value) counts as positional 0 and does not glob-match; the matcher does not match; only dash-prefixed tokens are recognized as flags
 
-#### Scenario: Inserted global flag no longer shifts positional indices, its value does
+#### Scenario: Inserted global flag no longer shifts positional indices — its value does
 
 - **WHEN** matcher is `{ "position": 0, "pattern": "push", "action": "allow" }` on tool `git`, and segments are `git push --force` and `git -c key=val push --force`
 - **THEN** in `git push --force` position 0 is `push` (matches); in `git -c key=val push --force` the flag `-c` is skipped but its value `key=val` occupies position 0; the matcher does not match and the segment falls to the glob level (documented heuristic limitation)
 
-#### Scenario: All-position, all candidates match
+#### Scenario: All-position — all candidates match
 
 - **WHEN** matcher is `{ "position": "all", "pattern": "/Users/me/work/**", "action": "allow" }` and segment is `cp /Users/me/work/a.txt /Users/me/work/b.txt /Users/me/work/dest/`
 - **THEN** the matcher matches (all three paths glob-match) and contributes `allow`
 
-#### Scenario: All-position with allow, one mismatch fails the whole matcher
+#### Scenario: All-position with allow — one mismatch fails the whole matcher
 
 - **WHEN** same matcher and segment is `cp /Users/me/work/a.txt /tmp/out`
 - **THEN** the matcher does not match and contributes nothing; the segment falls to the glob level
@@ -108,22 +108,22 @@ The system SHALL match a segment's tokens against arg matchers independently. To
 - **WHEN** same matcher and segment is `cp -R /Users/me/work/a.txt /Users/me/work/b.txt`
 - **THEN** the matcher matches (`-R` is not a candidate; both paths glob-match)
 
-#### Scenario: All-position, no candidates means no match
+#### Scenario: All-position — no candidates means no match
 
 - **WHEN** same matcher and segment is `cp` (no positional tokens)
 - **THEN** the matcher does not match
 
-#### Scenario: All-position with deny, one sensitive path is enough
+#### Scenario: All-position with deny — one sensitive path is enough
 
 - **WHEN** matcher is `{ "position": "all", "pattern": "/etc/**", "action": "deny" }` and segment is `rm /Users/me/work/a.txt /etc/passwd`
 - **THEN** the matcher matches (`/etc/passwd` glob-matches) and contributes `deny`; the mixed command cannot escape the deny
 
-#### Scenario: All-position with deny, no matching candidate means no match
+#### Scenario: All-position with deny — no matching candidate means no match
 
 - **WHEN** same matcher and segment is `rm /Users/me/work/a.txt /Users/me/work/b.txt`
 - **THEN** the matcher does not match and contributes nothing; the segment falls to the glob level
 
-#### Scenario: All-position with deny, no candidates means no match
+#### Scenario: All-position with deny — no candidates means no match
 
 - **WHEN** same matcher and segment is `rm -rf` (only flag-like tokens)
 - **THEN** the matcher does not match
@@ -153,7 +153,7 @@ The system SHALL match a segment's tokens against arg matchers independently. To
 - **WHEN** tool entry is `git` with `{ "token": "push", "action": "allow", "args": [{ "token": "--force", "action": "deny" }] }` and segment is `git status` or `git commit --force-ish`
 - **THEN** no nested matcher is evaluated; `push` and `--force` do not match
 
-#### Scenario: Ancestor actions are not accumulated with a deeper descendant
+#### Scenario: Nested subcommand rules
 
 - **WHEN** tool entry is `git` with `{ "token": "push", "action": "allow", "args": [{ "token": "--force", "action": "deny" }] }` and segment is `git push --force origin main`
 - **THEN** the deeper `--force` level is selected and contributes only `deny`; the ancestor `push` action does not contribute
@@ -177,7 +177,7 @@ When one or more arg matchers match at the same evaluation level, the segment's 
 - **WHEN** segment `find /Users/me/work/logs -delete` matches both `-delete → ask` and position-0 `allow` matchers
 - **THEN** the args-level action is `ask`
 
-#### Scenario: Deny wins over ask at the same level
+#### Scenario: Deny wins over ask
 
 - **WHEN** segment `git push --force-with-lease` matches sibling nested `--force-with-lease → allow` and `--force* → deny` matchers at the `push` level
 - **THEN** the args-level action is `deny`
@@ -187,7 +187,7 @@ When one or more arg matchers match at the same evaluation level, the segment's 
 - **WHEN** segment `find /Users/me/work/logs -type f` matches only the position-0 `allow` matcher
 - **THEN** the args-level action is `allow`
 
-#### Scenario: No match, no opinion
+#### Scenario: No match — no opinion
 
 - **WHEN** segment `find /tmp -type f` matches no matcher of the `find` entry
 - **THEN** the segment has no args-level opinion

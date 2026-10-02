@@ -99,6 +99,6 @@ Keep regression coverage for quoted tokens, clustered flags, values, positions, 
 
 1. Implement normalization and recursive local-result selection behind the existing `permissions` schema. No new option or dependency is added.
 2. Update unit and pipeline tests to establish the exact-path contract and protect unchanged behavior.
-3. Update the `args-permission-matching` specification and user-facing configuration documentation to mark nested behavior as breaking. Show that ancestor rules must be expanded into explicit leaves.
-4. Release as a breaking version. Users review nested `args` trees and add explicit leaf matchers for every command path they previously expected an ancestor action to cover. Omitted actions now mean `ask`.
+3. Update the `args-permission-matching` specification and user-facing configuration documentation to mark nested behavior as breaking. Show that ancestor rules must be expanded into explicit leaves and that omitted matcher actions now default to `ask`.
+4. Release as a breaking version. Users review nested `args` trees and add explicit leaf matchers for every command path they previously expected an ancestor action to cover.
 5. Roll back by releasing the prior plugin version if users cannot migrate immediately. There is no runtime compatibility mode, because supporting both accumulated and exact-path interpretation would make the same configuration ambiguous.
