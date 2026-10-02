@@ -6,7 +6,7 @@
 ## 2. Token Classification
 
 - [ ] 2.1 Implement the linear structural classification pass in `src/config.ts`: after `<executable>` classify tokens into command-path candidates, flags (boolean, value-taking by declaration, `=`-form inline value), flag values, positionals, and trailing arguments after the first `--`.
-- [ ] 2.2 Resolve flag arity from the entry: value matcher declarations and the `flags` table; undeclared flags are value-less (fail-safe); a declared value consumes the next token only when it exists, is not `--`, and does not start with `-`.
+- [ ] 2.2 Resolve flag arity from the entry: value matcher declarations and the `flags` table; undeclared flags are value-less (fail-safe); a declared value consumes the next token unconditionally (including `-`-prefixed tokens) when it exists and is not `--` — the explicit declaration is authoritative.
 
 ## 3. Matching
 

@@ -27,14 +27,14 @@ Every segment is parsed once, after `<executable>`, into a classified sequence. 
 2. The first token equal to `--` ends classification: every later token is a `trailing-arg` (positional class; never a command level, never a flag, never a flag value). A later `--` is an ordinary trailing argument.
 3. A token starting with `-` is a flag:
    - `<flag>=<flag-value>` (`=`-form) is self-contained: flag with inline value, never a positional.
-   - Otherwise the flag's arity is looked up (see below). If declared value-taking **and** the next token exists, is not `--`, and does not start with `-`, the next token is consumed as its `flag-value`; otherwise the flag is value-less.
+   - Otherwise the flag's arity is looked up (see below). If declared value-taking, the next token is consumed unconditionally as its `flag-value` (even when it starts with `-` — negative numbers and options-as-values are values), provided a next token exists and is not `--`; otherwise the flag is value-less. An explicit arity declaration always wins — no dash-based second-guessing.
 4. Every remaining token is a positional. Positionals before the path completes are command-level candidates; after the path completes they are `trailing-arg`s.
 
 **Flag arity sources (normative):**
 
 1. *Value matcher declaration*: a matcher `{ "token": "<global-flag>", "pattern": "<flag-value>" }` declares that flag value-taking — the matcher consumes the `<flag>` + `<flag-value>` pair atomically.
 2. *Declarative arity table*: the tool entry MAY declare `"flags": { "<global-flag>": 1, "<local-flag>": 0 }`. Only `0` and `1` are valid; any other value invalidates the entry (warn-and-drop). Arity keys match whole flag tokens exactly (no cluster expansion).
-3. *Undeclared flags* are value-less by assumption (fail-safe): an intended value that does not start with `-` remains a positional and therefore breaks anchored path matching — fail-closed. To get position independence for a value flag, declare it via 1 or 2.
+3. *Undeclared flags* are value-less by assumption (fail-safe): an intended value remains a positional and therefore breaks anchored path matching — fail-closed. To get position independence for a value flag, declare it via 1 or 2. Declaration is authoritative: a declared value-taking flag consumes its value unconditionally (including `-`-prefixed values); only a missing next token or the `--` separator prevents consumption.
 
 One token is never both a command level and a flag value: classification happens once, before any matcher runs, and matchers evaluate against the classified sequence (the separate representation). Path elements, flag tokens, and flag values come from disjoint classes by construction.
 
