@@ -21,38 +21,47 @@ See [proposal.md](proposal.md). The matcher engine evaluates every matcher indep
 
 ## Token Model
 
-Every segment is parsed once, after `<executable>`, into a classified sequence. The parse is linear, deterministic, and shared by all matchers of the tool entry:
+Every segment is parsed once, after `<executable>`, by a linear, deterministic, shared classification. The classification never decides what a "trailing argument" is — that is derived per path matcher — it only separates flags, flag values, and operands:
 
 1. Scan tokens left to right.
-2. The first token equal to `--` ends classification: every later token is a `trailing-arg` (positional class; never a command level, never a flag, never a flag value). A later `--` is an ordinary trailing argument.
+2. The first token equal to `--` switches to the post-separator region: every later token is a post-separator **operand** (never a command level, never a flag, never a flag value — but visible to position-based safety policies). A later `--` is an ordinary operand.
 3. A token starting with `-` is a flag:
-   - `<flag>=<flag-value>` (`=`-form) is self-contained: flag with inline value, never a positional.
-   - Otherwise the flag's arity is looked up (see below). If declared value-taking, the next token is consumed unconditionally as its `flag-value` (even when it starts with `-` — negative numbers and options-as-values are values), provided a next token exists and is not `--`; otherwise the flag is value-less. An explicit arity declaration always wins — no dash-based second-guessing.
-4. Every remaining token is a positional. Positionals before the path completes are command-level candidates; after the path completes they are `trailing-arg`s.
+   - `<flag>=<flag-value>` (`=`-form) is self-contained: flag with inline value, never an operand.
+   - Otherwise the flag's arity is looked up (see below). If declared value-taking, the next token is consumed unconditionally as its `flag-value` (even when it starts with `-` — negative numbers and options-as-values are values), provided a next token exists and is not `--`. An explicit arity declaration always wins — no dash-based second-guessing. Otherwise the flag is value-less.
+4. Every remaining token is an operand.
+
+Two ordered views are derived from the classification:
+
+- **Command sequence** — the pre-separator operands (declared flag values excluded), in segment order. Used by path matchers: levels form an anchored, contiguous prefix; the remainder is *that matcher's* trailing arguments.
+- **Operand list** — every non-flag token in segment order: command operands, declared flag values, and post-separator operands. Used by `position` matchers, so `deny`/`ask` policies see real operands everywhere, including after `--`.
 
 **Flag arity sources (normative):**
 
 1. *Value matcher declaration*: a matcher `{ "token": "<global-flag>", "pattern": "<flag-value>" }` declares that flag value-taking — the matcher consumes the `<flag>` + `<flag-value>` pair atomically.
 2. *Declarative arity table*: the tool entry MAY declare `"flags": { "<global-flag>": 1, "<local-flag>": 0 }`. Only `0` and `1` are valid; any other value invalidates the entry (warn-and-drop). Arity keys match whole flag tokens exactly (no cluster expansion).
-3. *Undeclared flags* are value-less by assumption (fail-safe): an intended value remains a positional and therefore breaks anchored path matching — fail-closed. To get position independence for a value flag, declare it via 1 or 2. Declaration is authoritative: a declared value-taking flag consumes its value unconditionally (including `-`-prefixed values); only a missing next token or the `--` separator prevents consumption.
+3. *Undeclared flags* are value-less by assumption (fail-safe): an intended value remains an operand and therefore breaks anchored path matching before the path completes. Declaration is authoritative: a declared value-taking flag consumes its value unconditionally; only a missing next token or the `--` separator prevents consumption.
 
-One token is never both a command level and a flag value: classification happens once, before any matcher runs, and matchers evaluate against the classified sequence (the separate representation). Path elements, flag tokens, and flag values come from disjoint classes by construction.
+**Arity is aggregated per executable before any matching.** Declarations are collected from every entry of that executable (a value matcher contributes `1`, the `flags` table contributes its declared value); absence is not a declaration, so any single declaration wins. Conflicting declarations for the same flag (`0` vs `1`) suspend the executable's args policy: every segment of that executable resolves to `ask` — glob allows are suspended for that tool — and a warning names the flag and the conflicting entries. One entry seeing a token as a flag value while another sees it as a command level is exactly such a conflict; it must never produce divergent outcomes for the same `argv`.
+
+**Invalid policies fail closed per executable.** An entry or matcher that fails validation is dropped from the rule set, and the affected executable is flagged: its segments resolve to `ask` (glob allows suspended for that tool) until the config is fixed, with a warning naming the entry. Dropping a restrictive rule alone is fail-open — control would fall to a possibly-allowing glob — so the scoped ask is mandatory, not optional.
+
+**Path matchers carry flag predicates.** Within an array `token`, dash-prefixed elements are *flag predicates* (the flag must appear somewhere in the segment, exact or cluster-expanded; position-free by definition) and non-dash elements are *positional levels* (anchored, contiguous, order-enforced). Class-splitting keeps both requirements deterministic: array order across the two classes is ignored, authors MAY interleave, and a command level that starts with `-` is unrepresentable (documented). This keeps legacy `["<command>", "<dangerous-flag>"]` rules working as path + flag predicate — they must not fail open into a glob fallback.
 
 ## Design Variants
 
 ### Variant 1 — Ordered, anchored path matcher (chosen)
 
-Keep `token: string[]` and redefine its semantics: the path matches the *leading* positional command tokens in order, contiguously; flags and declared flag values interleave freely; trailing arguments follow only after the complete path.
+Keep `token: string[]` and redefine its semantics: non-dash elements are positional levels forming an anchored, contiguous, order-enforced prefix of the command sequence; dash-prefixed elements are position-free flag predicates; trailing operands follow only after the complete path.
 
 - Readability: one line per path; the config mirrors the command.
-- Semantics: unambiguous — anchoring plus contiguity plus order fully determine the match.
-- Fail-safe: foreign positionals and undeclared flag values break matches (fail-closed); no partial-path action exists because the matcher is atomic.
+- Semantics: unambiguous — anchoring plus contiguity plus order fully determine the match; flag predicates are presence checks, immune to ordering.
+- Fail-safe: foreign positionals, undeclared flag values before the path, and missing levels break matches (fail-closed); no partial-path action exists because the matcher is atomic.
 - Depth: array length — arbitrary.
 - Flag independence: by the token model; requires declaring value flags.
-- Flag-value matchers: atomic `<flag>` + `<flag-value>` pairs, structurally grounded (the value is the classified neighbor or the `=`-form), never a path substitute.
-- Refinement: unchanged lineage rule (path-prefix; pattern over bare token).
-- Compatibility: array-token behavior intentionally changes (this is the fix); schema gains the optional `flags` arity table; `pattern` restricted to flag tokens.
-- Implementation: one linear classification pass + prefix comparison; no recursion, no backtracking.
+- Flag-value matchers: atomic `<flag>` + `<flag-value>` pairs with action-derived repetition quantifiers, structurally grounded, never a path substitute.
+- Refinement: lineage rule extended — levels-prefix plus flag-predicate superset.
+- Compatibility: legacy `["<command>", "<dangerous-flag>"]` rules become path + flag predicate with equivalent-or-narrower meaning — no fail-open migration gap. Array-token behavior intentionally changes otherwise.
+- Implementation: one linear classification pass + prefix comparison + presence checks; no recursion, no backtracking.
 - Unexpected-match risk: eliminated for the reported hazards (see Decisions).
 
 ### Variant 2 — Nested matchers with neutral intermediate nodes
@@ -86,25 +95,30 @@ Restore `args` nesting; nodes with children are pure grouping (no action); the a
 
 ## Permission Semantics
 
-- A path matcher is **fully matched** only when every configured level equals, in order, the leading positional command tokens (flags and declared values excluded from that sequence), with no foreign positional before or between levels. `action` applies to the matcher as a whole; intermediate levels are not nodes and carry no action — a partial path contributes nothing, so a parent can never `allow` before a deeper condition is checked.
-- Overlap resolution stays: matchers refined by another matching matcher (path-prefix extension, or a value `pattern` over the same bare flag token) are discarded; survivors reduce most-restrictive (`deny` > `ask` > `allow`). A precise child path therefore can loosen a general ancestor rule, while an independent flag `deny`/`ask` — incomparable with the path rule — always survives refinement and constrains the result.
+- A path matcher is **fully matched** only when every positional level equals, in order, the leading command-sequence operands (flags and declared flag values excluded from that sequence), no foreign operand precedes or separates the levels, and every flag predicate of the matcher is present somewhere in the segment. `action` applies to the matcher as a whole; levels are not nodes and carry no action — a partial path contributes nothing, so a parent can never `allow` before a deeper condition is checked.
+- Overlap resolution stays: matchers refined by another matching matcher are discarded; survivors reduce most-restrictive (`deny` > `ask` > `allow`). A refines B iff B's positional levels are a prefix of A's levels **and** A's flag predicates are a superset of B's (the refined match set is a strict subset), or A and B share the same single flag token and A adds a `pattern`. A precise path can therefore loosen a general rule, and a flag-scoped `deny` beats a general `allow` — both by the same subset rule. Incomparable matchers always reduce most-restrictive, so an independent flag `deny`/`ask` survives refinement and constrains the result.
+- Value matchers repeat deterministically with an action-derived quantifier, mirroring `position: "all"`: with `allow`, **every** occurrence of the flag must carry a value glob-matching the pattern (a missing value fails the allow); with `ask`/`deny`, **one** matching occurrence suffices. Without this, a single benign occurrence would let refinement discard a general deny while a malignant occurrence remains — fail-open.
 - `token` + `pattern` remains an atomic `<flag>` + `<flag-value>` pair matcher: the `pattern` MUST bind to the structurally adjacent value (next token or `=`-form). It MUST NOT have a non-flag `token`: such matchers are rejected at validation, because an adjacent pair found inside an arbitrary `argv` position must never authorize a command path.
-- Position matchers index the structural positional list (declared flag values excluded; `--` never counted). `position: "all"` keeps its fail-safe quantifiers over that list.
-- No matcher matched → the existing `permission.bash` glob pipeline, external-directory checks, and native checks apply unchanged. Broken JSONC → degraded mode before matching; invalid matchers are warned and dropped, never reinterpreted.
+- Position matchers index the **operand list** — every non-flag token in segment order: command operands, declared flag values, and post-separator operands. `position: "all"` keeps its fail-safe quantifiers over that list; `deny`/`ask` therefore keep seeing sensitive operands wherever they sit — as flag values or after `--`.
+- Invalid policies (invalid entry or matcher) and arity conflicts trigger the scoped ask described in the token model: the affected executable's segments resolve to `ask` — glob allows suspended for that tool — until the config is fixed.
+- No matcher matched (tool not flagged) → the existing `permission.bash` glob pipeline, external-directory checks, and native checks apply unchanged. Broken JSONC → degraded mode before matching; invalid matchers are warned, dropped from the rule set, and never reinterpreted.
 
 ## Risks / Trade-offs
 
 - [Array-token configs written for order-free matching may stop matching] → Intentional: those matches are the reported hazard. Migration documents the anchored semantics; failures are fail-closed (fall through to the glob pipeline).
-- [Undeclared value flags break path matches for value-carrying invocations] → Fail-closed by design; the normative rule and the `flags` arity table make the fix explicit in config.
-- [Non-flag `token` + `pattern` matchers are dropped at startup] → A dropped rule never adds permissions; the warning names the entry and the migration path (convert to a path matcher).
-- [Position indices shift for configs that relied on dash-less flag values counted as positionals] → Only when the flag is declared; declared values leaving the positional pool is the documented correction of the old heuristic.
-- [Boolean unknown flags in front of the path still work; unknown value flags do not] → Deterministic, documented, fail-closed; declaring the flag restores order independence.
+- [Legacy `["<command>", "<dangerous-flag>"]` rules must keep working] → Flag predicates in paths preserve them with equivalent-or-narrower meaning; a validation rejection here would be fail-open and is explicitly not done.
+- [Undeclared value flags are position-dependent] → Inherent to missing arity knowledge: before the path the would-be value breaks the match (fail-closed); after the path it behaves exactly as if the flag were absent — never wider than the no-flag baseline. Position independence is guaranteed for declared flags only; documented normatively.
+- [Non-flag `token` + `pattern` matchers are dropped at startup] → Dropping a restrictive rule alone is fail-open — control would fall to a possibly-allowing glob. The scoped ask for the affected executable closes that gap; the warning names the entry and the migration path.
+- [Position indices now count declared flag values] → Honest operand indexing: `deny`/`ask` must see real operands wherever they sit. Configs re-index or declare fewer flags; documented.
+- [Arity conflicts suspend a whole executable's args policy to ask] → Deliberately conservative: divergent classification across entries of one executable must never produce per-entry outcomes for the same `argv`. The warning names the flag and the conflicting entries.
+- [Omitted actions silently restrict] → Default is `ask`, never allow; normalization is covered by parser tests.
 
 ## Migration Plan
 
-1. Treat every array `token` as an ordered anchored path. Audit rules whose elements could appear out of order or inside longer commands; split or scope them.
-2. Convert every non-flag `token` + `pattern` matcher into a path matcher (`token: [a, b]`), or into a flag matcher if the token is actually a flag. Startup warnings name each rejected entry.
-3. Declare value-taking flags (`flags` table or a value matcher) wherever order independence is required across their values.
-4. Re-check `position` / `position: "all"` indices that counted dash-less flag values of now-declared flags; re-index or declare fewer flags.
-5. Refinement precedence is unchanged; no action needed for configs using only single-token matchers without `pattern`.
-6. No compatibility shims: ambiguous forms are rejected with warnings, never silently reinterpreted. Release as a breaking version.
+1. Treat every array `token` as an ordered anchored path of positional levels; dash-prefixed elements are now flag predicates — legacy `["<command>", "<dangerous-flag>"]` deny rules keep matching with equivalent-or-narrower meaning; no action required for them.
+2. Convert every non-flag `token` + `pattern` matcher into a path matcher (`token: [a, b]`), or into a flag matcher if the token is actually a flag. Startup warnings name each rejected entry, and the affected executable asks until fixed.
+3. Declare value-taking flags (`flags` table or a value matcher) wherever order independence is required across their values; declare boolean flags for documentation.
+4. Re-check `position` / `position: "all"` indices that now count declared flag values; re-index or declare fewer flags.
+5. Fix any arity conflicts (`0` vs `1` across entries of one executable) — the executable asks until resolved.
+6. Refinement precedence is unchanged for patternless single-token rules; no action needed for configs using only those.
+7. No compatibility shims: ambiguous forms are rejected with warnings, never silently reinterpreted. Release as a breaking version.
