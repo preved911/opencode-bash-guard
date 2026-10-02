@@ -6,8 +6,9 @@
 ## 2. Token Classification
 
 - [ ] 2.1 Implement the linear structural classification pass in `src/config.ts`: after `<executable>` classify tokens into flags (boolean, value-taking by declaration, `=`-form inline value), flag values, pre-separator command operands, and post-separator operands. Classification never decides trailing arguments — that is derived per path matcher.
-- [ ] 2.2 Aggregate flag arity per executable before matching: collect declarations from value matchers and the `flags` tables of all entries of that tool; absence is not a declaration; a `0` vs `1` conflict suspends the executable's args policy (scoped ask, warning naming the flag and entries).
+- [ ] 2.2 Aggregate flag arity per executable before matching with deterministic precedence: an explicit `flags` table declaration wins over value-matcher inference; absence is not a declaration; only a table-vs-table conflict suspends the executable's args policy (scoped ask, warning naming the flag and entries).
 - [ ] 2.3 Implement scoped ask: any invalid entry or matcher drops the rule AND forces the affected executable's segments to `ask` with glob allows suspended for that tool, until the config is fixed.
+- [ ] 2.4 Emit a one-time warning per undeclared flag the first time it is observed followed by a non-dash token (probable missing arity declaration).
 
 ## 3. Matching
 
