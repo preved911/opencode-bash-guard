@@ -72,7 +72,7 @@ For each segment's command name, the system SHALL check against the parsed `perm
 
 ### Requirement: Match resolved paths against external_directory patterns
 
-For each extracted file path from a segment, resolve to absolute path and check against `external_directory` patterns. If a path falls outside allowed directories, apply `external_directory`'s action.
+For each extracted file path from a segment, the system SHALL resolve it to an absolute path and check it against `external_directory` patterns. If a path falls outside allowed directories, the system SHALL apply `external_directory`'s action.
 
 #### Scenario: Path inside allowed directory
 - **WHEN** `external_directory` is `{ "./**": "allow", "*": "ask" }` and the path resolves within `./**`

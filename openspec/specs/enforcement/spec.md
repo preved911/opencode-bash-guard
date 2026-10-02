@@ -100,6 +100,8 @@ When the resolved chain action is `ask` and the command contains more than one t
 
 ### Requirement: Handle edge cases
 
+The handler SHALL return without modification for empty and whitespace-only commands.
+
 #### Scenario: Empty command
 - **WHEN** the command is empty
 - **THEN** the handler SHALL return without modification
