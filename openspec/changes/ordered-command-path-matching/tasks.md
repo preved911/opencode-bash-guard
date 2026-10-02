@@ -6,16 +6,16 @@
 ## 2. Token Classification
 
 - [ ] 2.1 Implement the linear structural classification pass in `src/config.ts`: after `<executable>` classify tokens into flags (boolean, value-taking by declaration, `=`-form inline value), flag values, pre-separator command operands, and post-separator operands. Classification never decides trailing arguments — that is derived per path matcher.
-- [ ] 2.2 Aggregate flag arity per executable before matching with deterministic precedence: an explicit `flags` table declaration wins over value-matcher inference; absence is not a declaration; only a table-vs-table conflict suspends the executable's args policy (scoped ask, warning naming the flag and entries).
+- [ ] 2.2 Aggregate flag arity per executable before matching with deterministic precedence: an explicit `flags` table declaration wins over value-matcher inference; absence is not a declaration; a value matcher on a table-declared value-less flag is a contradiction, and an equal-rank table conflict (`0` vs `1`) is unresolved — both suspend the executable's args policy (scoped ask, warning naming the flag and entries).
 - [ ] 2.3 Implement scoped ask: any invalid entry or matcher drops the rule AND forces the affected executable's segments to `ask` with glob allows suspended for that tool, until the config is fixed.
-- [ ] 2.4 Emit a one-time warning per undeclared flag the first time it is observed followed by a non-dash token (probable missing arity declaration).
+- [ ] 2.4 Treat an undeclared flag followed by a non-dash token as a probable missing arity: the segment resolves to `ask` regardless of the flag's position, and a one-time warning names the flag to declare.
 
 ## 3. Matching
 
 - [ ] 3.1 Redefine array-token matching in `src/config.ts`: non-dash elements are positional levels forming an anchored, contiguous, order-enforced prefix of the command sequence; dash-prefixed elements are position-free flag predicates (presence, exact or cluster-expanded); foreign operands break the match; the remainder after the levels is the matcher's trailing arguments.
 - [ ] 3.2 Ground value matchers in the classification: `pattern` binds to the structurally adjacent value token or the `=`-form of the same flag; repeated occurrences use the action-derived quantifier (`allow`: every occurrence; `ask`/`deny`: at least one); reject non-flag `token` + `pattern` matchers at validation (warn-and-drop + scoped ask).
-- [ ] 3.3 Re-point `position` and `position: "all"` to the operand list (command operands, declared flag values, post-separator operands, in segment order; flags never operands) and keep the fail-safe `allow`/`ask`/`deny` quantifiers.
-- [ ] 3.4 Extend `refines()` (path-prefix extension including equal levels plus flag-predicate superset; value pattern over the same bare flag token) and keep most-restrictive reduction of survivors; keep `resolveSegment` fallback behavior (glob, external-directory, redirect, degraded mode) unchanged for unflagged tools.
+- [ ] 3.3 Split position views: `position` and `position: "all"` index the positional list (declared flag values and inline value atoms excluded — indices stable under flag placement); the new `operand: "all"` matcher indexes the safety operand list (declared flag values, `=`-form inline value atoms, post-separator operands) with the same fail-safe quantifiers.
+- [ ] 3.4 Extend `refines()` (levels-prefix plus flag-predicate superset, strict in at least one dimension — structurally identical matchers never refine each other; value pattern over the same bare flag token) and keep most-restrictive reduction of survivors; keep `resolveSegment` fallback behavior (glob, external-directory, redirect, degraded mode) unchanged for unflagged tools.
 
 ## 4. Documentation
 
