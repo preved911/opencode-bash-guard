@@ -1,0 +1,69 @@
+## Context
+
+See [proposal.md](proposal.md) for motivation. The current implementation spans shell parsing in `src/chain.ts`, native and plugin configuration in `src/config.ts` and `src/plugin-config.ts`, enforcement in `src/enforce.ts`, and hook wiring in `src/index.ts`. These layers currently exchange shell text, parsed segments, configuration, decisions, readability results, and callID state directly.
+
+The refactor must retain the published matcherVersion 2 JSONC format, including comments and trailing commas, global then project deep-merge precedence, invalid-file degraded mode, and current structured argument matcher normalization. It must also retain current parser coverage, policy precedence, redirect and path handling, optional readability behavior, and dual-hook decision delivery.
+
+## Goals / Non-Goals
+
+**Goals:**
+
+- Define a parser boundary that converts shell input into normalized invocations while preserving segment ordering, argv, redirects, nesting data, parse errors, and source text needed by existing behavior.
+- Define a pure policy evaluator that receives normalized invocations plus effective policy and returns decisions without reading files, mutating hook output, or owning callID state.
+- Keep readability as a constraint applied to the evaluated result, preserving the current opt-in thresholds and ask-only rejection path.
+- Keep OpenCode integration in an adapter that loads configuration, calls the parser and evaluator, wraps commands when required, and transfers stored decisions from `tool.execute.before` to `permission.ask` by callID.
+- Establish characterization tests before moving code, then require full behavioral parity after each extraction stage.
+
+**Non-Goals:**
+
+- Change public configuration, matcher syntax, default values, supported shell forms, decision outcomes, messages, or hook contracts.
+- Add command-specific bundled policies.
+- Add external executable checks or predicates. That work belongs to issue #43.
+- Change existing OpenSpec requirements. This change has no specification delta.
+
+## Decisions
+
+### Separate parsing from normalized invocations
+
+Introduce a parser-facing model that turns a bash command into normalized invocations. Each invocation carries the command text and name, quote-aware argv, redirects, and any parser-derived context needed for chain and readability evaluation. The parser remains responsible for shell syntax, command substitutions, meta-command bodies, depth, and parse failures.
+
+This keeps AST details at the parsing boundary and prevents policy code from reparsing shell strings. Keeping policy evaluation text-driven was considered, but it would preserve the current coupling and risk inconsistent argv or redirect treatment.
+
+### Make policy evaluation pure
+
+Move segment and chain decisions into pure functions over normalized invocations, working directory, and already-normalized effective policy. Preserve the current ordering: structured argument matches decide a matching invocation before glob evaluation, refinement and most-restrictive semantics remain unchanged, and path, redirect, and external-directory results combine with the existing precedence. Chain aggregation must keep deny over ask over allow, with all invocations required for a chain allow.
+
+The evaluator returns decision data rather than mutating a decision store or hook output. A stateful evaluator was considered, but it would make characterization and parity checks depend on OpenCode lifecycle details.
+
+### Keep readability as a post-evaluation constraint
+
+Apply the optional readability constraint only after parsing and policy evaluation identify an ask result. It consumes normalized invocation data plus command-wide depth and per-line information, preserving strict-greater thresholds, inline-script counting, allowed and denied paths, no-opinion paths, parse-error handling, and current rejection messages.
+
+Embedding readability into parser or policy evaluation was considered. That would mix a presentation-oriented constraint with syntax or decision semantics and make the ask-only condition harder to verify.
+
+### Isolate OpenCode adapter responsibilities
+
+Keep configuration discovery and parsing at initialization, then let the adapter build effective policy, invoke the parser, evaluator, and readability constraint, and translate the result into hook effects. The adapter alone owns command wrapping, throwing readability rejections, and callID decision storage and cleanup across `tool.execute.before` and `permission.ask`.
+
+Moving hook state into the evaluator was rejected because callIDs and hook output are OpenCode-specific. Keeping all behavior in the current enforcement module was rejected because it leaves the architectural boundary unclear.
+
+### Preserve configuration loading and precedence
+
+Keep native permission parsing separate from plugin-file loading, but expose a single effective policy input to the evaluator. matcherVersion 2 JSONC parsing must continue to accept comments and trailing commas, deep-merge global then project settings, normalize structured argument matchers, and enter ask-everything degraded mode when any loaded file is invalid.
+
+Replacing the loader or flattening project and global data earlier was considered, but either could alter precedence or degraded-mode behavior.
+
+## Risks / Trade-offs
+
+- [Boundary changes alter a decision edge case] -> Add characterization fixtures for parser output, matcherVersion 2 JSONC merging, segment and chain decisions, readability outcomes, and hook handoff before extraction. Compare the extracted path against those fixtures.
+- [Normalized invocation loses parser detail] -> Include argv, redirects, command text, command name, per-line counts, parse status, and nesting data in the model, then cover substitutions, meta-commands, quoted arguments, redirects, and multiline input.
+- [Adapter extraction breaks callID cleanup or forced allow and deny] -> Test the full `tool.execute.before` to `permission.ask` sequence for ask, deny, argument-level allow, parse errors, and readability rejection.
+- [Incremental moves create temporary duplicate logic] -> Move one responsibility at a time and remove the old path only after parity tests pass.
+
+## Migration Plan
+
+1. Add characterization tests that capture the existing behavior at each planned boundary.
+2. Extract normalized invocation parsing behind the existing call sites and run the focused and full test suites.
+3. Extract pure policy evaluation, then readability evaluation, retaining the same adapter-visible result shape.
+4. Move OpenCode-specific orchestration into the adapter, remove superseded coupling, and confirm regression parity.
+5. Release as an internal refactor with no configuration migration, compatibility layer, or rollback data change. If parity fails before release, revert the extraction commits or restore the prior module boundary.
