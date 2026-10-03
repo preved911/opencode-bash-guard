@@ -349,7 +349,6 @@ function evalMatcher(matcher: ArgMatcher, views: SegmentViews): boolean {
   if (matcher.token !== undefined) {
     if (Array.isArray(matcher.token)) {
       const { levels, predicates } = parsePathElements(matcher.token);
-      console.log('[DBG path]', JSON.stringify(matcher.token), 'levels:', JSON.stringify(levels), 'preds:', JSON.stringify(predicates), 'cmdSeq:', JSON.stringify(views.commandSequence), 'flags:', JSON.stringify(views.flagOccurrences));
       // Path levels are an anchored, contiguous prefix of the command sequence
       // (pre-separator operands minus declared flag values); post-separator
       // operands can never complete a path.
@@ -379,7 +378,6 @@ function evalMatcher(matcher: ArgMatcher, views: SegmentViews): boolean {
     }
 
     const token = matcher.token;
-    console.log('[DEBUG value]', JSON.stringify({ token, pattern: matcher.pattern, occurrences: views.flagOccurrences }), 'safety:', JSON.stringify(views.safetyOperandList));
     if (matcher.pattern !== undefined) {
       // Value matcher over a repeated flag: `allow` requires every occurrence's value
       // to glob-match (an occurrence without a value fails the allow); `ask`/`deny`
