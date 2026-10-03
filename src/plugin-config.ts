@@ -21,12 +21,15 @@ export const DEFAULT_RESTRUCTURE_CONFIG: RestructureConfig = {
 export interface PluginFileConfig {
   restructure: RestructureConfig;
   toolPermissions: ToolPermissionEntry[];
+  /** Executables whose args policy is suspended into scoped ask (invalid/unmigrated config). */
+  forcedAskTools: string[];
   degraded: boolean;
 }
 
 export const DEFAULT_PLUGIN_FILE_CONFIG: PluginFileConfig = {
   restructure: DEFAULT_RESTRUCTURE_CONFIG,
   toolPermissions: [],
+  forcedAskTools: [],
   degraded: false,
 };
 
@@ -105,15 +108,32 @@ function resolveThreshold(value: unknown, fallback: number, name: string): numbe
  * silently re-allow a restricted command. Individual invalid `permissions` entries are
  * dropped with a warning while the rest keep working.
  */
+/**
+ * Parse the collected config files (in increasing precedence order).
+ * JSONC syntax (comments, trailing commas) is allowed; objects deep-merge, project wins.
+ * Any file with invalid JSONC enters degraded mode: `permissions` treated as absent AND
+ * glob allows are suspended downstream (ask-everything), so a broken config can never
+ * silently re-allow a restricted command. Individual invalid `permissions` entries are
+ * dropped with a warning while the rest keep working.
+ *
+ * `matcherVersion` gates the ordered command path semantics. It is honored only in the
+ * config source that provides the effective `permissions` array — a marker from a
+ * different source cannot opt in a project-local legacy permissions block. A config
+ * source with a non-empty `permissions` array and no `"matcherVersion": 2` is unmigrated:
+ * every executable it names resolves to `ask` (scoped) with a one-time migration warning.
+ * Any non-2 marker value triggers global degraded ask.
+ */
 export function parsePluginConfig(files: PluginConfigFile[]): PluginFileConfig {
   if (files.length === 0) {
-    return { restructure: { ...DEFAULT_RESTRUCTURE_CONFIG }, toolPermissions: [], degraded: false };
+    return { restructure: { ...DEFAULT_RESTRUCTURE_CONFIG }, toolPermissions: [], forcedAskTools: [], degraded: false };
   }
 
   let merged: Record<string, unknown> = {};
   let allValid = true;
+  let permissionsSource = -1;
+  let markerSource = -1;
 
-  for (const file of files) {
+  for (const [index, file] of files.entries()) {
     const errors: ParseError[] = [];
     const parsed = parseJsonc(file.content, errors, { allowTrailingComma: true });
     if (errors.length > 0 || parsed === undefined || parsed === null || typeof parsed !== "object") {
@@ -123,11 +143,14 @@ export function parsePluginConfig(files: PluginConfigFile[]): PluginFileConfig {
       allValid = false;
       continue;
     }
-    merged = deepMerge(merged, parsed as Record<string, unknown>);
+    const parsedObject = parsed as Record<string, unknown>;
+    if (parsedObject.permissions !== undefined) permissionsSource = index;
+    if (parsedObject.matcherVersion !== undefined) markerSource = index;
+    merged = deepMerge(merged, parsedObject);
   }
 
   if (!allValid) {
-    return { restructure: { ...DEFAULT_RESTRUCTURE_CONFIG }, toolPermissions: [], degraded: true };
+    return { restructure: { ...DEFAULT_RESTRUCTURE_CONFIG }, toolPermissions: [], forcedAskTools: [], degraded: true };
   }
 
   const raw = isPlainObject(merged.restructure) ? merged.restructure : {};
@@ -138,9 +161,40 @@ export function parsePluginConfig(files: PluginConfigFile[]): PluginFileConfig {
     maxDepth: resolveThreshold(raw.max_depth, DEFAULT_RESTRUCTURE_CONFIG.maxDepth, "max_depth"),
   };
 
+  const validated = validateToolPermissions(merged.permissions);
+  const forcedAskTools = new Set<string>(validated.forcedAskTools);
+
+  // The matcherVersion marker is honored only from the source that contributes the
+  // effective `permissions` array; a marker from a different source is ignored.
+  if (markerSource !== -1 && markerSource !== permissionsSource) {
+    console.warn(
+      `[opencode-bash-guard] Ignoring matcherVersion in ${files[markerSource].path} — it does not provide the effective \`permissions\` array.`,
+    );
+  }
+  const markerHonored = markerSource === permissionsSource ? merged.matcherVersion : undefined;
+
+  const rawPermissions = Array.isArray(merged.permissions) ? (merged.permissions as unknown[]) : [];
+  if (rawPermissions.length > 0) {
+    if (markerHonored === undefined) {
+      for (const item of rawPermissions) {
+        const tool = item && typeof item === "object" && typeof (item as { tool?: unknown }).tool === "string" ? (item as { tool: string }).tool : null;
+        if (tool) forcedAskTools.add(tool);
+      }
+      console.warn(
+        `[opencode-bash-guard] Unmigrated permissions (no \`"matcherVersion": 2\` next to \`permissions\`) — affected executables resolve to \`ask\` until the config is audited for anchored path semantics.`,
+      );
+    } else if (markerHonored !== 2) {
+      console.warn(
+        `[opencode-bash-guard] Invalid matcherVersion (${JSON.stringify(markerHonored)}) — degraded mode: every bash command will ask until it is set to 2.`,
+      );
+      return { restructure, toolPermissions: validated.entries, forcedAskTools: [...forcedAskTools], degraded: true };
+    }
+  }
+
   return {
     restructure,
-    toolPermissions: validateToolPermissions(merged.permissions),
+    toolPermissions: validated.entries,
+    forcedAskTools: [...forcedAskTools],
     degraded: false,
   };
 }

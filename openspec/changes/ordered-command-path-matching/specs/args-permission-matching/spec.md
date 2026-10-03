@@ -8,6 +8,36 @@ Each matcher SHALL declare exactly one selector: `token: string | string[]`, `po
 
 An omitted action SHALL normalize to `ask`; valid actions are `allow`, `ask`, and `deny`. Every invalid entry or matcher SHALL be dropped with a warning and SHALL force its identifiable executable to scoped `ask` with glob allows suspended. An invalid entry without a valid `tool`, a non-array `permissions` section, or another unscopable top-level schema failure SHALL trigger global degraded ask. When neither config source has a `permissions` section, the parsed rule list SHALL be empty and behavior SHALL remain unchanged. When the selected config file fails to parse as JSONC, the plugin SHALL enter global degraded ask before matcher evaluation: every segment resolves to `ask` except parse-error segments that already deny, and no native glob allow may bypass the failure.
 
+#### Scenario: Valid entries parse
+
+- **WHEN** `permissions` contains `{ "tool": "<executable>", "args": [{ "token": "<local-flag>", "action": "ask" }, { "position": 0, "pattern": "<positional>", "action": "allow" }] }`
+- **THEN** one tool entry is stored with two validated arg matchers
+
+#### Scenario: Array token parses as a path
+
+- **WHEN** `permissions` contains `{ "tool": "<executable>", "args": [{ "token": ["<primary-command>", "<secondary-command>"], "action": "deny" }] }`
+- **THEN** one matcher is stored with a two-level ordered command path and action `deny`
+
+#### Scenario: Omitted action defaults to ask
+
+- **WHEN** `permissions` contains `{ "tool": "<executable>", "args": [{ "token": "<local-flag>" }] }`
+- **THEN** the matcher is stored with its action normalized to `ask`
+
+#### Scenario: Invalid entries dropped with warning
+
+- **WHEN** `permissions` contains an entry without `tool`, a matcher with both `token` and `position`, a matcher with neither `token` nor `position`, one with `action: "block"`, a legacy matcher declaring nested `args`, a matcher combining `pattern` with an array `token`, a matcher combining `pattern` with a non-flag single-string `token`, a matcher whose `token` is `--`, an array `token` containing a `--` element, an array `token` containing a `=`-bearing element, an entry with a `flags` value other than `0` or `1`, and an entry with an empty array `token`
+- **THEN** each invalid entry is dropped from the rule set, a warning names it, and the affected executable resolves to `ask` (glob allows suspended for that tool) until the config is fixed
+
+#### Scenario: Section absent
+
+- **WHEN** `opencode-bash-guard.jsonc` does not exist or has no `permissions` section
+- **THEN** the args rule list is empty and no behavior changes vs. the previous release
+
+#### Scenario: Broken config file degrades to ask-everything
+
+- **WHEN** `opencode-bash-guard.jsonc` contains a JSONC syntax error and native config has `"*": "ask"` as the fallback
+- **THEN** a warning names the parse error and every bash segment resolves to `ask`; the prompt persists until the config is fixed
+
 #### Scenario: Non-empty permissions require a same-source version marker
 
 - **WHEN** a project config supplies a non-empty `permissions` array without `matcherVersion: 2`, while the global config contains `matcherVersion: 2`
@@ -111,6 +141,141 @@ Classification SHALL derive two views:
 - **WHEN** argv contains an ordinary positional, a separate flag value, an inline value, and a post-separator operand
 - **THEN** all four are candidates of `operand: "all"`, while only the ordinary pre-separator positional is in the positional list
 
+#### Scenario: Quoted flag cannot bypass a deny
+
+- **WHEN** matcher is `{ "token": ["<primary-command>", "<local-flag>"], "action": "deny" }` and segment is `<executable> <primary-command> "<local-flag>" <trailing-arg>`
+- **THEN** the token is argv-style (quotes stripped) and the path matches — quoting does not bypass the deny
+
+#### Scenario: Clustered short flags match single-letter targets
+
+- **WHEN** matcher is `{ "token": "<local-flag>", "action": "deny" }` where `<local-flag>` is a single-letter short flag, and segment is `<executable> <positional> <clustered-flags> <trailing-arg>`
+- **THEN** the clustered token expands for matching and the single-letter target matches, contributing `deny`
+
+#### Scenario: Cluster matches do not consume — sibling flags still match
+
+- **WHEN** an entry declares both `{ "token": "<first-short-flag>", "action": "deny" }` and `{ "token": "<second-short-flag>", "action": "ask" }`, and segment is `<executable> <positional> <clustered-both-flags>`
+- **THEN** both matchers match the same clustered token independently and contribute (`deny`, `ask`); the args-level action is `deny`
+
+#### Scenario: Token value matchers do not match via cluster expansion
+
+- **WHEN** matcher is `{ "token": "<local-flag>", "pattern": "<flag-value>", "action": "deny" }` where `<local-flag>` is a single-letter short flag, and segment is `<executable> <positional> <clustered-flags> <flag-value>`
+- **THEN** the matcher does not match — a value cannot be attributed to one letter of a cluster; token value matching requires exact token equality
+
+#### Scenario: Key=value options are ordinary candidates
+
+- **WHEN** matcher is `{ "position": "all", "pattern": "<positional>", "action": "deny" }` and segment is `<executable> <key=value-positional> <key=value-positional>`
+- **THEN** the candidates are the full tokens, neither glob-matches, and the matcher does not match; key=value options without a leading dash are not flags and are not decomposed (documented limitation; the pattern must match the full token)
+
+#### Scenario: Flag token matches anywhere
+
+- **WHEN** matcher is `{ "token": "<local-flag>", "action": "ask" }` and segment is `<executable> <positional> <positional> <local-flag>`
+- **THEN** the matcher matches and contributes `ask`
+
+#### Scenario: Flag not present — no match
+
+- **WHEN** matcher is `{ "token": "<local-flag>", "action": "ask" }` and segment is `<executable> <positional> <positional>`
+- **THEN** the matcher does not match
+
+#### Scenario: Positional pattern match
+
+- **WHEN** matcher is `{ "position": 0, "pattern": "<positional>", "action": "allow" }` and segment is `<executable> <positional> <local-flag>`
+- **THEN** the matcher matches (operand 0 is the leading positional)
+
+#### Scenario: Positional pattern mismatch
+
+- **WHEN** matcher is `{ "position": 0, "pattern": "<positional>", "action": "allow" }` and segment is `<executable> <trailing-arg>`
+- **THEN** the matcher does not match
+
+#### Scenario: Numeric position counts positional arguments only — flags never shift the index
+
+- **WHEN** a `<executable>` entry declares `{ "token": "<local-flag>", "action": "ask" }` and `{ "position": 0, "pattern": "<positional>", "action": "allow" }`, and segments are `<executable> <positional> <local-flag>` and `<executable> <local-flag> <positional>`
+- **THEN** both segments resolve `position: 0` to the same positional — flags never occupy a positional slot regardless of where they appear; both matchers contribute and the args-level action is `ask`
+
+#### Scenario: Flag values without a dash count as positionals (heuristic limitation)
+
+- **WHEN** no arity is declared for `<local-flag>` and matcher is `{ "position": 0, "pattern": "<positional>", "action": "allow" }`, and segment is `<executable> <local-flag> <flag-value>`
+- **THEN** the undeclared flag followed by a non-dash token is a probable missing arity and the segment resolves to `ask` — an undeclared value never silently occupies a positional slot (declaring the flag removes the ambiguity)
+
+#### Scenario: Inserted global flag no longer shifts positional indices — its value does
+
+- **WHEN** the entry declares `"<flags>": { "<global-flag>": 1 }` and matcher is `{ "position": 0, "pattern": "<primary-command>", "action": "allow" }`, and segments are `<executable> <primary-command> <local-flag>` and `<executable> <global-flag> <flag-value> <primary-command> <local-flag>`
+- **THEN** in both segments position 0 is `<primary-command>` and the matcher matches — a declared flag and its value never occupy positional slots (indices are stable under flag placement); the declared value remains visible to the operand matcher for safety policies
+
+#### Scenario: All-position — all candidates match
+
+- **WHEN** matcher is `{ "position": "all", "pattern": "<positional>", "action": "allow" }` and segment is `<executable> <positional> <positional> <positional>`
+- **THEN** the matcher matches (all candidates glob-match) and contributes `allow`
+
+#### Scenario: All-position with allow — one mismatch fails the whole matcher
+
+- **WHEN** same matcher and one candidate does not glob-match the pattern
+- **THEN** the matcher does not match and contributes nothing; the segment falls to the glob level
+
+#### Scenario: All-position ignores flag-like tokens
+
+- **WHEN** same matcher and segment is `<executable> <local-flag> <positional> <positional>`
+- **THEN** the matcher matches (flags are not candidates)
+
+#### Scenario: All-position — no candidates means no match
+
+- **WHEN** same matcher and segment is `<executable> <local-flag>`
+- **THEN** the matcher does not match
+
+#### Scenario: All-position with deny — one sensitive path is enough
+
+- **WHEN** matcher is `{ "position": "all", "pattern": "<positional>", "action": "deny" }` and one of the positional candidates glob-matches the pattern
+- **THEN** the matcher matches and contributes `deny` — the mixed command cannot escape the deny
+
+#### Scenario: All-position with deny — no matching candidate means no match
+
+- **WHEN** same matcher and no candidate glob-matches the pattern
+- **THEN** the matcher does not match and contributes nothing; the segment falls to the glob level
+
+#### Scenario: All-position with deny — no candidates means no match
+
+- **WHEN** same matcher and segment is `<executable> <local-flag>`
+- **THEN** the matcher does not match
+
+#### Scenario: All-position combines with other matchers
+
+- **WHEN** an entry declares both `{ "position": "all", "pattern": "<positional>", "action": "allow" }` and `{ "token": "<local-flag>", "action": "deny" }`, and segment is `<executable> <positional> <positional> <local-flag>`
+- **THEN** both matchers contribute (`allow`, `deny`) and the args-level action is `deny`
+
+#### Scenario: Flag value pattern
+
+- **WHEN** matcher is `{ "token": "<local-flag>", "pattern": "<flag-value>", "action": "allow" }` and segment is `<executable> <primary-command> <local-flag> <flag-value>`
+- **THEN** the matcher matches the atomic flag-with-value pair; a different value does not match
+
+#### Scenario: Nested subcommand rules
+
+- **WHEN** tool entry is `<executable>` with `{ "token": ["<primary-command>", "<secondary-command>", "<local-flag>"], "action": "deny" }` and segment is `<executable> <primary-command> <secondary-command> <local-flag> <trailing-arg>`
+- **THEN** `<local-flag>` is a flag predicate (position-free), the positional levels form the anchored contiguous prefix, and the rule contributes `deny`; a path rule is self-contained — there is no ancestor action to accumulate
+
+#### Scenario: Nested rules require the parent token
+
+- **WHEN** tool entry is `<executable>` with `{ "token": ["<primary-command>", "<secondary-command>"], "action": "deny" }` and segments are `<executable> <trailing-arg>`, `<executable> <primary-command>`, and `<executable> <primary-command> <secondary-command-partial>`
+- **THEN** none match: every level must be present, anchored, and whole-token
+
+#### Scenario: Consumed tokens are not rematched
+
+- **WHEN** matcher is `{ "token": ["<primary-command>", "<primary-command>"], "action": "deny" }` and segments are `<executable> <primary-command> <primary-command>` and `<executable> <primary-command> <trailing-arg>`
+- **THEN** the first matches (path elements consume distinct positional tokens) and the second does not
+
+#### Scenario: Path matches regardless of argument order
+
+- **WHEN** matcher is `{ "token": ["<primary-command>", "<secondary-command>"], "action": "allow" }`, the entry declares `"<flags>": { "<global-flag>": 0 }`, and segments are `<executable> <primary-command> <secondary-command> <global-flag>`, `<executable> <global-flag> <primary-command> <secondary-command>`, and `<executable> <primary-command> <global-flag> <secondary-command>`
+- **THEN** all three segments produce the identical result — flag placement (argument order of flags) is irrelevant; the command-path levels themselves remain order-enforced
+
+#### Scenario: Path rule covers trailing arguments
+
+- **WHEN** matcher is `{ "token": ["<primary-command>", "<secondary-command>"], "action": "deny" }` and segment is `<executable> <primary-command> <secondary-command> <trailing-arg> <trailing-arg>`
+- **THEN** the path matches and contributes `deny` — trailing arguments after the complete path never invalidate a match
+
+#### Scenario: Path with separate-token flag value
+
+- **WHEN** the entry declares `"<flags>": { "<global-flag>": 1 }` and matcher is `{ "token": ["<primary-command>"], "flagValues": { "<global-flag>": "<flag-value>" }, "action": "allow" }`, and segment is `<executable> <global-flag> <flag-value> <primary-command>`
+- **THEN** `<flag-value>` is consumed as the flag's value, is not a positional, and the path matches
+
 **Matching rules.**
 
 Every matcher SHALL evaluate independently against the immutable classified segment; one matcher never consumes or hides atoms from another. A scalar base-flag `token` without `pattern` SHALL match an equal base-flag atom anywhere in the segment, including a member exposed by safe short-cluster expansion, and one occurrence is sufficient for every action. A scalar non-flag `token` SHALL match an equal safety-operand atom anywhere in the segment. Exact whole-atom equality is required.
@@ -151,6 +316,46 @@ Scalar flag value matchers SHALL bind only to the classified adjacent value. For
 Matched rules SHALL first discard only rules proven to be refined, then reduce survivors most-restrictive (`deny` > `ask` > `allow`). One array path refines another only when the general positional levels are a prefix, every general presence predicate and `flagValues` pair is structurally identical in the specific matcher, and at least one dimension is strict. Presence and value predicates on the same base flag are incomparable. Structurally identical matchers do not refine each other.
 
 Array paths, scalar non-flag token matchers, scalar flag matcher families, position matchers, and operand matchers SHALL be mutually incomparable across matcher kinds. Within one scalar flag family, matchers for different base flags or different value patterns are incomparable. A patterned `allow` MAY refine the same bare flag only when every repeated occurrence satisfies the pattern. A patterned `ask` and a bare `deny` SHALL remain incomparable. All incomparable matches reduce most-restrictive. If no matcher matches and the executable is not suspended or invalid, the existing native glob pipeline decides unchanged.
+
+#### Scenario: Ask wins over allow
+
+- **WHEN** segment matches both a `<local-flag> → ask` matcher and a position-0 `allow` matcher
+- **THEN** the matchers are incomparable (position matchers never refine) and the args-level action is `ask`
+
+#### Scenario: Deny wins over ask
+
+- **WHEN** segment matches `{ "token": "<local-flag>", "action": "deny" }` and `{ "position": "all", "pattern": "<positional>", "action": "ask" }`
+- **THEN** the matchers are incomparable and the args-level action is `deny`
+
+#### Scenario: Single match decides
+
+- **WHEN** segment matches only a position-0 `allow` matcher
+- **THEN** the args-level action is `allow`
+
+#### Scenario: No match — no opinion
+
+- **WHEN** segment matches no matcher of the entry
+- **THEN** the segment has no args-level opinion
+
+#### Scenario: Refined prefix rule is discarded
+
+- **WHEN** an entry declares `{ "token": ["<primary-command>"], "action": "deny" }` and `{ "token": ["<primary-command>", "<local-flag>"], "action": "ask" }`, and segment is `<executable> <primary-command> <local-flag>`
+- **THEN** the `["<primary-command>"]` rule is refined by the longer path and discarded; the args-level action is `ask` — not the most-restrictive `deny`
+
+#### Scenario: Refinement can loosen — allow exception under deny
+
+- **WHEN** an entry declares `{ "token": ["<primary-command>"], "action": "deny" }` and `{ "token": ["<primary-command>", "<secondary-command>"], "action": "allow" }`, and segments are `<executable> <primary-command> <secondary-command>` and `<executable> <primary-command> <trailing-arg>`
+- **THEN** the first resolves to `allow` (the refined rule overrides the deny), and the second to `deny` (the prefix rule still covers every unlisted path)
+
+#### Scenario: Global flag ask survives an exact-path allow
+
+- **WHEN** an entry declares `{ "token": ["<primary-command>", "<secondary-command>"], "action": "allow" }` and `{ "token": ["<global-flag>"], "action": "ask" }`, and segment is `<executable> <primary-command> <global-flag> <secondary-command>`
+- **THEN** neither rule refines the other, so both reduce most-restrictive-wins and the args-level action is `ask`
+
+#### Scenario: Value-constrained matcher refines its bare token
+
+- **WHEN** an entry declares `{ "token": "<local-flag>", "action": "deny" }` and `{ "token": "<local-flag>", "pattern": "<flag-value>", "action": "allow" }`, and segments are `<executable> <primary-command> <local-flag> <flag-value>` and `<executable> <primary-command> <local-flag> <trailing-arg>`
+- **THEN** the first resolves to `allow` (the value rule refines the bare flag and overrides it), and the second to `deny` (the pattern does not match, only the bare rule remains)
 
 #### Scenario: Value deny survives exact path allow
 

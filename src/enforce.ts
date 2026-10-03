@@ -74,6 +74,11 @@ export function resolveSegment(
 ): SegmentResolution {
   const tokens = argv ?? segment.split(/\s+/).filter((t) => t.length > 0);
 
+  // Scoped ask (invalid/unmigrated args config for this executable) overrides everything.
+  if (config.forcedAskTools?.includes(tokens[0])) {
+    return { action: "ask", allowFromArgsRule: false };
+  }
+
   // Pipeline order (spec): args rules decide the segment when any matcher matched; otherwise the legacy glob evaluation.
   const argsAction = matchToolPermissions(tokens, config.toolPermissions);
   if (argsAction !== null) {

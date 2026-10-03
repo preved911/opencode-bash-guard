@@ -14,6 +14,7 @@ const BashGuardPlugin: Plugin = async (input) => {
       pluginConfig = {
         ...parseConfig(config as unknown as Record<string, unknown>),
         toolPermissions: fileConfig.toolPermissions,
+        forcedAskTools: fileConfig.forcedAskTools,
       };
 
       if (!pluginConfig.enabled) {

@@ -19,66 +19,114 @@ describe("validateToolPermissions", () => {
 
   it("accepts valid entries (spec: valid entries parse)", () => {
     const messages: string[] = [];
-    const entries = validateToolPermissions(
+    const result = validateToolPermissions(
       [
         {
           tool: "find",
-          args: [{ token: "-delete", action: "ask" }, { position: 0, pattern: "/Users/me/work/**", action: "allow" }],
+          args: [{ token: "-delete", action: "ask" }, { position: 0, pattern: "<positional>", action: "allow" }],
         },
       ],
       warn(messages),
     );
-    expect(entries).toHaveLength(1);
-    expect(entries[0].args).toHaveLength(2);
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0].args).toHaveLength(2);
+    expect(result.forcedAskTools).toHaveLength(0);
+    expect(result.globalDegraded).toBe(false);
     expect(messages).toHaveLength(0);
   });
 
-  it("accepts array token paths and normalizes omitted actions to ask (spec: array token parses, omitted action defaults to ask)", () => {
+  it("accepts array token paths, flag predicates and flagValues (spec: array token parses)", () => {
     const messages: string[] = [];
-    const entries = validateToolPermissions(
+    const result = validateToolPermissions(
       [
-        { tool: "git", args: [{ token: ["push", "--force"], action: "deny" }] },
+        {
+          tool: "git",
+          args: [
+            { token: ["push", "--force"], action: "deny" },
+            { token: ["get"], flagValues: { "--namespace": "kube-system" }, action: "deny" },
+          ],
+          flags: { "--force": 1, "--namespace": 1 },
+        },
         { tool: "find", args: [{ token: "-delete" }] },
       ],
       warn(messages),
     );
-    expect(entries).toHaveLength(2);
-    expect(entries[0].args[0].token).toEqual(["push", "--force"]);
-    expect(entries[1].args[0].action).toBe("ask");
+    expect(result.entries).toHaveLength(2);
+    expect(result.entries[0].args[0].token).toEqual(["push", "--force"]);
+    expect(result.entries[0].args[1].flagValues).toEqual({ "--namespace": "kube-system" });
+    expect(result.entries[1].args[0].action).toBe("ask");
     expect(messages).toHaveLength(0);
   });
 
-  it("drops invalid entries with warnings (spec: invalid entries dropped)", () => {
+  it("duplicate dash elements in a path are invalid (spec: validation)", () => {
     const messages: string[] = [];
-    const entries = validateToolPermissions(
+    const result = validateToolPermissions(
+      [{ tool: "tool", args: [{ token: ["run", "--opt", "--opt"], action: "deny" }] }],
+      (m) => messages.push(m),
+    );
+    expect(result.entries).toHaveLength(0);
+    expect(result.forcedAskTools).toEqual(["tool"]);
+    expect(messages).toHaveLength(1);
+  });
+
+  it("drops invalid entries with warnings, global degrade for unscopeable (spec: invalid entries dropped)", () => {
+    const messages: string[] = [];
+    const result = validateToolPermissions(
       [
         { args: [{ token: "-x", action: "deny" }] },
         { tool: "git", args: [{ token: "-x", position: 0, action: "deny" }] },
         { tool: "git", args: [{ position: -1, pattern: "a", action: "deny" }] },
         { tool: "git", args: [{ position: 0, action: "deny" }] },
         { tool: "git", args: [{ token: "-x", pattern: "y", args: [{ token: "z", action: "deny" }], action: "deny" }] },
-        { tool: "git", args: [{ token: "-x", action: "block" }] },
         { tool: "git", args: [{ token: ["push"], pattern: "y", action: "deny" }] },
         { tool: "git", args: [{ token: [], action: "deny" }] },
+        { tool: "git", args: [{ token: "--", action: "deny" }] },
+        { tool: "git", args: [{ token: ["push", "--"], action: "deny" }] },
+        { tool: "git", args: [{ token: "push", pattern: "y", action: "deny" }] },
+        { tool: "git", args: [{ token: "--force=x", action: "deny" }] },
+        { tool: "git", args: [{ token: ["get"], flagValues: { "--force=x": "v" }, action: "deny" }] },
+        { tool: "git", args: [{ token: "-x", flagValues: { "--force": "v" }, action: "deny" }] },
+        { tool: "git", args: [{ token: "-x", action: "deny", unknownField: 1 }] },
+        { tool: "git", unknownEntryField: 1, args: [{ token: "-x", action: "deny" }] },
+        { tool: "git", args: [{ token: "-x", action: "deny" }], flags: { "--force": 2 } },
         "not-an-object",
       ],
       warn(messages),
     );
-    expect(entries).toHaveLength(0);
-    expect(messages).toHaveLength(9);
+    expect(result.entries).toHaveLength(0);
+    expect(result.globalDegraded).toBe(true);
+    expect(result.forcedAskTools).toEqual(["git"]);
+    expect(messages).toHaveLength(17);
   });
 
-  it("drops only the invalid entry, keeps valid siblings", () => {
+  it("flags arity table must be 0 or 1 (spec: flags table values)", () => {
     const messages: string[] = [];
-    const entries = validateToolPermissions(
+    const good = validateToolPermissions(
+      [{ tool: "git", args: [{ token: "push", action: "allow" }], flags: { "--force": 1, "--dry-run": 0 } }],
+      warn(messages),
+    );
+    expect(good.entries[0].flags).toEqual({ "--force": 1, "--dry-run": 0 });
+    const bad = validateToolPermissions(
+      [{ tool: "git", args: [{ token: "push", action: "allow" }], flags: { "--force": 2 } }],
+      warn(messages),
+    );
+    expect(bad.entries).toHaveLength(0);
+    expect(bad.forcedAskTools).toEqual(["git"]);
+    expect(messages).toHaveLength(1);
+  });
+
+  it("drops only the invalid entry, keeps valid siblings, scopes ask to the tool", () => {
+    const messages: string[] = [];
+    const result = validateToolPermissions(
       [
         { tool: "find", args: [{ token: "-delete", action: "deny" }] },
         { tool: "find", args: [{ position: "all", action: "deny" }] },
       ],
       warn(messages),
     );
-    expect(entries).toHaveLength(1);
-    expect(entries[0].args).toHaveLength(1);
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0].args).toHaveLength(1);
+    expect(result.forcedAskTools).toEqual(["find"]);
   });
 });
 
@@ -114,80 +162,81 @@ describe("matchTokenPattern", () => {
 });
 
 describe("matchToolPermissions (matcher semantics)", () => {
-  const denyDelete = [{ tool: "find", args: [{ token: "-delete", action: "deny" as const }] }];
-
-  it("flag token matches anywhere and is absent otherwise", () => {
-    expect(matchToolPermissions(argvOf('find /tmp -name "*.log" -delete'), denyDelete)).toBe("deny");
-    expect(matchToolPermissions(argvOf('find /tmp -name "*.log"'), denyDelete)).toBeNull();
+  it("bare scalar flag matches a classified flag atom (presence, no value inspection)", () => {
+    const entry = [{ tool: "find", args: [{ token: "-delete", action: "deny" as const }] }];
+    expect(matchToolPermissions(argvOf("find /tmp -delete"), entry)).toBe("deny");
+    expect(matchToolPermissions(argvOf("find /tmp"), entry)).toBeNull();
   });
 
-  it("quoted flag is visible to the matcher (no bypass via quotes)", () => {
-    const entry = [{ tool: "git", args: [{ token: ["push", "--force"], action: "deny" as const }] }];
-    expect(matchToolPermissions(argvOf('git push "--force" origin main'), entry)).toBe("deny");
+  it("value pattern: matches the flag value only on exact token match (declared arity 1)", () => {
+    const entry = [{ tool: "curl", args: [{ token: "-X", pattern: "GET", action: "allow" as const }], flags: { "-X": 1 as const } }];
+    expect(matchToolPermissions(argvOf("curl -X GET"), entry)).toBe("allow");
+    expect(matchToolPermissions(argvOf("curl -X POST"), entry)).toBeNull();
   });
 
-  it("clustered short flags match single-letter targets, siblings still match", () => {
+  it("value pattern matchers do not match via cluster expansion (spec: unsafe cluster resolves to ask)", () => {
+    const entry = [{ tool: "rm", args: [{ token: "-f", pattern: "/tmp/**", action: "deny" as const }] }];
+    expect(matchToolPermissions(argvOf("rm -rf /tmp/x"), entry)).toBe("ask");
+    expect(matchToolPermissions(argvOf("rm -f /tmp/x"), entry)).toBe("deny");
+  });
+
+  it("numeric position indexes the positional list (declared values excluded, post-separator included)", () => {
+    const entry = [
+      { tool: "find", args: [{ position: 0, pattern: "/tmp/**", action: "ask" as const }], flags: { "-name": 1 as const } },
+    ];
+    expect(matchToolPermissions(argvOf("find /tmp/logs -name x"), entry)).toBe("ask");
+    expect(matchToolPermissions(argvOf("find -name x /tmp/logs"), entry)).toBe("ask");
+    expect(matchToolPermissions(argvOf("find -name x -- /tmp/logs"), entry)).toBe("ask");
+    expect(matchToolPermissions(argvOf("find /work/logs -name x"), entry)).toBeNull();
+  });
+
+  it("undeclared value-flag is a probable missing arity — the segment asks (fail-safe)", () => {
+    const entry = [{ tool: "find", args: [{ position: 0, pattern: "/tmp/**", action: "allow" as const }] }];
+    expect(matchToolPermissions(argvOf("find -name x /tmp/logs"), entry)).toBe("ask");
+    expect(matchToolPermissions(argvOf("find /tmp/logs"), entry)).toBe("allow");
+  });
+
+  it("declared zero flag rejects equals-form value (spec: declared zero rejects equals value)", () => {
+    const entry = [{ tool: "tool", args: [{ token: ["primary-command"], action: "allow" as const }], flags: { "--mode": 0 as const } }];
+    expect(matchToolPermissions(argvOf("tool primary-command --mode=value"), entry)).toBe("ask");
+    expect(matchToolPermissions(argvOf("tool primary-command --mode value"), entry)).toBe("allow");
+  });
+
+  it("all + allow: every positional candidate must match", () => {
+    const entry = [{ tool: "cp", args: [{ position: "all" as const, pattern: "/work/**", action: "allow" as const }] }];
+    expect(matchToolPermissions(argvOf("cp /work/a.txt /work/b.txt"), entry)).toBe("allow");
+    expect(matchToolPermissions(argvOf("cp /work/a.txt /tmp/out"), entry)).toBeNull();
+  });
+
+  it("all + allow: flag-like tokens are not candidates; no candidates means no match", () => {
+    const entry = [{ tool: "cp", args: [{ position: "all" as const, pattern: "/work/**", action: "allow" as const }], flags: { "-f": 0 as const } }];
+    expect(matchToolPermissions(argvOf("cp -f /work/a.txt"), entry)).toBe("allow");
+    expect(matchToolPermissions(argvOf("cp -f"), entry)).toBeNull();
+  });
+
+  it("operand matcher covers ordinary positionals, declared flag values and post-separator operands (spec: complete safety view)", () => {
     const entry = [
       {
         tool: "rm",
         args: [
-          { token: "-r", action: "deny" as const },
-          { token: "-f", action: "ask" as const },
+          { operand: "all" as const, pattern: "**/etc/**", action: "deny" as const },
+          { position: "all" as const, pattern: "/work/**", action: "allow" as const },
         ],
+        flags: { "-f": 1 as const },
       },
     ];
-    expect(matchToolPermissions(argvOf("rm -rf /tmp/x"), entry)).toBe("deny");
+    expect(matchToolPermissions(argvOf("rm /work/a.txt /etc/passwd"), entry)).toBe("deny");
+    expect(matchToolPermissions(argvOf("rm -f /etc/passwd"), entry)).toBe("deny");
+    expect(matchToolPermissions(argvOf("rm /work/a.txt -- /etc/passwd"), entry)).toBe("deny");
+    expect(matchToolPermissions(argvOf("rm /work/a.txt"), entry)).toBe("allow");
   });
 
-  it("value pattern: matches the flag value only on exact token match", () => {
-    const entry = [{ tool: "curl", args: [{ token: "-X", pattern: "GET", action: "allow" as const }] }];
-    expect(matchToolPermissions(argvOf("curl -X GET https://api.com"), entry)).toBe("allow");
-    expect(matchToolPermissions(argvOf("curl -X POST https://api.com"), entry)).toBeNull();
-  });
-
-  it("value pattern matchers do not match via cluster expansion", () => {
-    const entry = [{ tool: "rm", args: [{ token: "-f", pattern: "/tmp/**", action: "deny" as const }] }];
-    expect(matchToolPermissions(argvOf("rm -rf /tmp/x"), entry)).toBeNull();
-    expect(matchToolPermissions(argvOf("rm -f /tmp/x"), entry)).toBe("deny");
-  });
-
-  it("numeric position counts positional args only, flags never occupy a slot", () => {
-    const entry = [{ tool: "find", args: [{ position: 0, pattern: "/tmp/**", action: "ask" as const }] }];
-    expect(matchToolPermissions(argvOf("find /tmp/logs -name x"), entry)).toBe("ask");
-    expect(matchToolPermissions(argvOf("find -delete /tmp/logs"), entry)).toBe("ask");
-    expect(matchToolPermissions(argvOf("find /work/logs -name x"), entry)).toBeNull();
-  });
-
-  it("dash-less flag values occupy positional slots (documented heuristic)", () => {
-    const entry = [{ tool: "find", args: [{ position: 0, pattern: "/tmp/**", action: "ask" as const }] }];
-    expect(matchToolPermissions(argvOf("find -name x /tmp/logs"), entry)).toBeNull();
-  });
-
-  it("all + allow: every candidate must match", () => {
-    const entry = [{ tool: "cp", args: [{ position: "all" as const, pattern: "/Users/me/work/**", action: "allow" as const }] }];
-    expect(matchToolPermissions(argvOf("cp /Users/me/work/a.txt /Users/me/work/b.txt"), entry)).toBe("allow");
-    expect(matchToolPermissions(argvOf("cp /Users/me/work/a.txt /tmp/out"), entry)).toBeNull();
-  });
-
-  it("all + allow: flag-like tokens are not candidates; no candidates means no match", () => {
-    const entry = [{ tool: "cp", args: [{ position: "all" as const, pattern: "/Users/me/work/**", action: "allow" as const }] }];
-    expect(matchToolPermissions(argvOf("cp -R /Users/me/work/a.txt"), entry)).toBe("allow");
-    expect(matchToolPermissions(argvOf("cp -R"), entry)).toBeNull();
-  });
-
-  it("all + deny: one sensitive path is enough (mixed commands cannot escape)", () => {
-    const entry = [{ tool: "rm", args: [{ position: "all" as const, pattern: "/etc/**", action: "deny" as const }] }];
-    expect(matchToolPermissions(argvOf("rm /Users/me/work/a.txt /etc/passwd"), entry)).toBe("deny");
-    expect(matchToolPermissions(argvOf("rm /Users/me/work/a.txt"), entry)).toBeNull();
-  });
-
-  it("key=value options are ordinary full-token candidates", () => {
-    const entry = [{ tool: "dd", args: [{ position: "all" as const, pattern: "/dev/**", action: "deny" as const }] }];
+  it("key=value operands are ordinary whole-token safety candidates", () => {
+    const entry = [{ tool: "dd", args: [{ operand: "all" as const, pattern: "/dev/**", action: "deny" as const }] }];
     expect(matchToolPermissions(argvOf("dd if=/dev/sda of=/dev/sdb"), entry)).toBeNull();
-    expect(matchToolPermissions(argvOf("dd if=/**"), entry)).toBeNull();
   });
 
-  it("path rules require every element as a whole token (spec: nested rules require the parent token)", () => {
+  it("path rules require every level as a whole token, anchored and contiguous (spec: nested rules require the parent token)", () => {
     const entry = [
       {
         tool: "git",
@@ -195,6 +244,7 @@ describe("matchToolPermissions (matcher semantics)", () => {
           { token: ["push", "--force"], action: "deny" as const },
           { token: "--force", action: "ask" as const },
         ],
+        flags: { "--force": 1 as const },
       },
     ];
     expect(matchToolPermissions(argvOf("git push --force origin main"), entry)).toBe("deny");
@@ -203,44 +253,79 @@ describe("matchToolPermissions (matcher semantics)", () => {
     expect(matchToolPermissions(argvOf("git commit --force-ish"), entry)).toBeNull();
   });
 
-  it("most restrictive wins across matchers and entries", () => {
+  it("path levels are anchored: a foreign operand before the path breaks the match", () => {
+    const entry = [{ tool: "git", args: [{ token: ["push", "--force"], action: "deny" as const }], flags: { "--force": 1 as const } }];
+    expect(matchToolPermissions(argvOf("git stash push --force"), entry)).toBeNull();
+  });
+
+  it("flag predicates are position-free presence checks (spec: atomic path plus value predicate)", () => {
     const entry = [
-      { tool: "find", args: [{ position: "all" as const, pattern: "/Users/me/work/**", action: "allow" as const }, { token: "-delete", action: "deny" as const }] },
+      {
+        tool: "kubectl",
+        args: [{ token: ["get"], flagValues: { "--namespace": "kube-system" }, action: "deny" as const }],
+        flags: { "--namespace": 1 as const },
+      },
     ];
-    expect(matchToolPermissions(argvOf("find /Users/me/work/a /Users/me/work/b -delete"), entry)).toBe("deny");
-    expect(matchToolPermissions(argvOf("find /Users/me/work/a -type"), entry)).toBe("allow");
-  });
-
-  it("inserted global flag shifts nothing for tokens; dash-less values do occupy positional slots", () => {
-    const pushEntry = [{ tool: "git", args: [{ position: 0, pattern: "push", action: "allow" as const }] }];
-    expect(matchToolPermissions(argvOf("git push --force"), pushEntry)).toBe("allow");
-    expect(matchToolPermissions(argvOf("git -c key=val push --force"), pushEntry)).toBeNull();
-  });
-});
-
-describe("path matchers & refinement (exact command paths)", () => {
-  it("path matches regardless of argument order (global flags)", () => {
-    const entry = [{ tool: "kubectl", args: [{ token: ["get", "--namespace=kube-system"], action: "deny" as const }] }];
     expect(matchToolPermissions(argvOf("kubectl get --namespace=kube-system pods"), entry)).toBe("deny");
     expect(matchToolPermissions(argvOf("kubectl --namespace=kube-system get pods"), entry)).toBe("deny");
     expect(matchToolPermissions(argvOf("kubectl get pods"), entry)).toBeNull();
+    expect(matchToolPermissions(argvOf("kubectl get --namespace=default pods"), entry)).toBeNull();
   });
 
-  it("path rule covers trailing arguments", () => {
-    const entry = [{ tool: "git", args: [{ token: ["push", "--force"], action: "deny" as const }] }];
+  it("repeated path levels are position-free presence predicates (spec: predicates do not consume)", () => {
+    const entry = [
+      {
+        tool: "tool",
+        args: [{ token: ["run", "--opt", "--opt"], action: "deny" as const }],
+        flags: { "--opt": 1 as const },
+      },
+    ];
+    expect(matchToolPermissions(argvOf("tool run --opt --opt"), entry)).toBe("deny");
+    expect(matchToolPermissions(argvOf("tool run --opt x"), entry)).toBe("deny");
+  });
+
+  it("most restrictive wins across matchers and entries", () => {
+    const entry = [
+      {
+        tool: "find",
+        args: [
+          { position: "all" as const, pattern: "/work/**", action: "allow" as const },
+          { token: "-delete", action: "deny" as const },
+        ],
+      },
+    ];
+    expect(matchToolPermissions(argvOf("find /work/a /work/b -delete"), entry)).toBe("deny");
+    expect(matchToolPermissions(argvOf("find /work/a -type"), entry)).toBe("ask");
+  });
+
+  it("inserted declared value-taking flag shifts nothing for path levels", () => {
+    const entry = [
+      { tool: "git", args: [{ token: ["push"], action: "allow" as const }], flags: { "-c": 1 as const } },
+    ];
+    expect(matchToolPermissions(argvOf("git push"), entry)).toBe("allow");
+    expect(matchToolPermissions(argvOf("git -c key=val push"), entry)).toBe("allow");
+  });
+});
+
+describe("path matchers, flag predicates & refinement", () => {
+  it("published value-bearing path rules keep their exact meaning under v2", () => {
+    const entry = [
+      {
+        tool: "kubectl",
+        args: [{ token: ["get"], flagValues: { "--namespace": "kube-system" }, action: "deny" as const }],
+        flags: { "--namespace": 1 as const },
+      },
+    ];
+    expect(matchToolPermissions(argvOf("kubectl get --namespace=kube-system pods"), entry)).toBe("deny");
+    expect(matchToolPermissions(argvOf("kubectl --namespace=kube-system get pods"), entry)).toBe("deny");
+    expect(matchToolPermissions(argvOf("kubectl get pods"), entry)).toBeNull();
+    expect(matchToolPermissions(argvOf("kubectl get --namespace=default pods"), entry)).toBeNull();
+  });
+
+  it("path rule covers trailing arguments; anchors reject foreign operands", () => {
+    const entry = [{ tool: "git", args: [{ token: ["push", "--force"], action: "deny" as const }], flags: { "--force": 1 as const } }];
     expect(matchToolPermissions(argvOf("git push --force origin main"), entry)).toBe("deny");
-  });
-
-  it("path with separate-token flag value", () => {
-    const entry = [{ tool: "kubectl", args: [{ token: ["get", "--namespace", "kube-system"], action: "deny" as const }] }];
-    expect(matchToolPermissions(argvOf("kubectl get --namespace kube-system pods"), entry)).toBe("deny");
-    expect(matchToolPermissions(argvOf("kubectl get --namespace default pods"), entry)).toBeNull();
-  });
-
-  it("path elements consume distinct tokens (spec: consumed tokens are not rematched)", () => {
-    const entry = [{ tool: "git", args: [{ token: ["push", "--force", "--force"], action: "deny" as const }] }];
-    expect(matchToolPermissions(argvOf("git push --force --force"), entry)).toBe("deny");
-    expect(matchToolPermissions(argvOf("git push --force origin"), entry)).toBeNull();
+    expect(matchToolPermissions(argvOf("git stash push --force"), entry)).toBeNull();
   });
 
   it("refined prefix rule is discarded (spec: refinement overrides, even toward ask)", () => {
@@ -251,12 +336,13 @@ describe("path matchers & refinement (exact command paths)", () => {
           { token: ["push"], action: "deny" as const },
           { token: ["push", "--force"], action: "ask" as const },
         ],
+        flags: { "--force": 1 as const },
       },
     ];
     expect(matchToolPermissions(argvOf("git push --force"), entry)).toBe("ask");
   });
 
-  it("refinement can loosen — allow exception under deny (spec: refinement can loosen)", () => {
+  it("refinement can loosen — allow exception under deny", () => {
     const entry = [
       {
         tool: "git",
@@ -264,13 +350,14 @@ describe("path matchers & refinement (exact command paths)", () => {
           { token: ["push"], action: "deny" as const },
           { token: ["push", "--force-with-lease"], action: "allow" as const },
         ],
+        flags: { "--force-with-lease": 0 as const },
       },
     ];
     expect(matchToolPermissions(argvOf("git push --force-with-lease origin"), entry)).toBe("allow");
     expect(matchToolPermissions(argvOf("git push origin"), entry)).toBe("deny");
   });
 
-  it("string and array token forms refine each other", () => {
+  it("scalar and array token forms stay incomparable (fail-safe deny wins)", () => {
     const entry = [
       {
         tool: "git",
@@ -280,11 +367,11 @@ describe("path matchers & refinement (exact command paths)", () => {
         ],
       },
     ];
-    expect(matchToolPermissions(argvOf("git push --force-with-lease"), entry)).toBe("allow");
+    expect(matchToolPermissions(argvOf("git push --force-with-lease"), entry)).toBe("deny");
     expect(matchToolPermissions(argvOf("git push origin"), entry)).toBe("deny");
   });
 
-  it("global flag ask survives an exact-path allow (spec: incomparable rules reduce most-restrictive)", () => {
+  it("global flag ask survives an exact-path allow (incomparable rules reduce most-restrictive)", () => {
     const entry = [
       {
         tool: "kubectl",
@@ -292,6 +379,7 @@ describe("path matchers & refinement (exact command paths)", () => {
           { token: ["get", "pods"], action: "allow" as const },
           { token: ["--namespace=kube-system"], action: "ask" as const },
         ],
+        flags: { "--namespace": 1 as const },
       },
     ];
     expect(matchToolPermissions(argvOf("kubectl get pods --namespace=kube-system"), entry)).toBe("ask");
@@ -306,24 +394,67 @@ describe("path matchers & refinement (exact command paths)", () => {
           { token: "-X", action: "deny" as const },
           { token: "-X", pattern: "GET", action: "allow" as const },
         ],
+        flags: { "-X": 1 as const },
       },
     ];
     expect(matchToolPermissions(argvOf("curl -X GET https://api.com"), entry)).toBe("allow");
     expect(matchToolPermissions(argvOf("curl -X POST https://api.com"), entry)).toBe("deny");
   });
 
+  it("a path rule and a value matcher are always incomparable (value deny survives exact-path allow)", () => {
+    const entry = [
+      {
+        tool: "tool",
+        args: [
+          { token: "--output", pattern: "**/etc/**", action: "deny" as const },
+          { token: ["generate", "--output"], action: "allow" as const },
+        ],
+        flags: { "--output": 1 as const },
+      },
+    ];
+    expect(matchToolPermissions(argvOf("tool generate --output=/etc/passwd"), entry)).toBe("deny");
+  });
+
+  it("repeated value flag: allow requires every occurrence (fail-safe refinement)", () => {
+    const entry = [
+      {
+        tool: "tool",
+        args: [
+          { token: "--mode", action: "deny" as const },
+          { token: "--mode", pattern: "safe", action: "allow" as const },
+        ],
+        flags: { "--mode": 1 as const },
+      },
+    ];
+    expect(matchToolPermissions(argvOf("tool --mode safe"), entry)).toBe("allow");
+    expect(matchToolPermissions(argvOf("tool --mode safe --mode dangerous"), entry)).toBe("deny");
+  });
+
   it("refinement pools across separate tool entries", () => {
     const entries = [
       { tool: "git", args: [{ token: ["push"], action: "deny" as const }] },
-      { tool: "git", args: [{ token: ["push", "--force-with-lease"], action: "allow" as const }] },
+      { tool: "git", args: [{ token: ["push", "--force-with-lease"], action: "allow" as const }], flags: { "--force-with-lease": 0 as const } },
     ];
     expect(matchToolPermissions(argvOf("git push --force-with-lease"), entries)).toBe("allow");
     expect(matchToolPermissions(argvOf("git push origin"), entries)).toBe("deny");
   });
 
   it("omitted action normalizes to ask and restricts (fail-safe default)", () => {
-    const entries = validateToolPermissions([{ tool: "find", args: [{ token: "-delete" }] }]);
+    const entries = validateToolPermissions([{ tool: "find", args: [{ token: "-delete" }] }]).entries;
     expect(matchToolPermissions(argvOf("find /tmp -delete"), entries)).toBe("ask");
+  });
+
+  it("structurally identical matchers never refine each other", () => {
+    const entry = [
+      {
+        tool: "git",
+        args: [
+          { token: ["push"], action: "deny" as const },
+          { token: ["push"], action: "deny" as const },
+        ],
+      },
+    ];
+    expect(matchToolPermissions(argvOf("git push origin"), entry)).toBe("deny");
   });
 });
 
@@ -342,7 +473,7 @@ describe("flag-level pipeline (beforeExecute + handlePermissionAsk)", () => {
 
   const withCurlAllow: PluginConfig = {
     ...nativeAskAll,
-    toolPermissions: [{ tool: "curl", args: [{ token: "-X", pattern: "GET", action: "allow" }] }],
+    toolPermissions: [{ tool: "curl", args: [{ token: "-X", pattern: "GET", action: "allow" }], flags: { "-X": 1 } }],
   };
 
   const withFindDeleteDeny: PluginConfig = {
@@ -351,7 +482,7 @@ describe("flag-level pipeline (beforeExecute + handlePermissionAsk)", () => {
       { pattern: "*", action: "ask" },
       { pattern: "find *", action: "allow" },
     ],
-    toolPermissions: [{ tool: "find", args: [{ token: "-delete", action: "deny" }] }],
+    toolPermissions: [{ tool: "find", args: [{ token: "-delete", action: "deny" }], flags: { "-name": 0 } }],
   };
 
   const restructure: RestructureConfig = { enabled: true, maxSegments: 3, maxDepth: 2 };
@@ -440,5 +571,15 @@ describe("flag-level pipeline (beforeExecute + handlePermissionAsk)", () => {
     const result = beforeExecute("Bash", "flag-level", "/project", { command: "wget evil.sh" }, nativeAskAll, restructure);
     expect(result.chainAction).toBe("ask");
     expect(result.rejectionMessage).toBeNull();
+  });
+
+  it("scoped ask: forcedAskTools overrides glob allows for that executable", () => {
+    const config: PluginConfig = {
+      ...withFindDeleteDeny,
+      forcedAskTools: ["find"],
+    };
+    const result = beforeExecute("Bash", "flag-level", "/project", { command: "find /tmp -name x" }, config, restructure);
+    expect(result.chainAction).toBe("ask");
+    expect(result.shouldWrap).toBe(true);
   });
 });
