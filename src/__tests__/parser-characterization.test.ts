@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { parseChain, parseChainPerLine, detectInlineScript, countScriptStatements, stripQuotePairs, extractArgv } from "../chain.js";
+import { parseCommand as parseChain, parseCommandPerLine as parseChainPerLine } from "../parser.js";
+import { detectInlineScript, countScriptStatements, stripQuotePairs, extractArgv } from "../parser.js";
 import { resolveCandidatePaths } from "../paths.js";
 import type { NormalizedInvocation } from "../parser.js";
 

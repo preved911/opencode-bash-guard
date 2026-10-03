@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { parsePluginConfig, DEFAULT_PLUGIN_FILE_CONFIG } from "../plugin-config.js";
 import type { PluginConfigFile } from "../plugin-config.js";
 import { validateToolPermissions, matchToolPermissions } from "../config.js";
-import { parseChain } from "../chain.js";
+import { parseCommand as parseChain } from "../parser.js";
 
 /**
  * Characterization tests (task 1.2): lock matcherVersion 2 JSONC configuration

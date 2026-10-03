@@ -4,7 +4,7 @@ import { resolveSegment, resolveChain } from "../policy.js";
 import { checkComplexity, buildRejectionMessage } from "../readability.js";
 import type { PluginConfig } from "../config.js";
 import type { RestructureConfig } from "../plugin-config.js";
-import { parseChain } from "../chain.js";
+import { parseCommand as parseChain } from "../parser.js";
 import type { NormalizedInvocation, RedirectInfo } from "../parser.js";
 
 /** Build a normalized invocation fixture through the parser boundary. */

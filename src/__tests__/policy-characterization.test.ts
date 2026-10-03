@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { parseConfig, matchBashPermission, matchExternalDirectory, matchToolPermissions, mostRestrictive } from "../config.js";
-import { parseChain } from "../chain.js";
+import { parseCommand as parseChain } from "../parser.js";
 import { resolveSegment, resolveChain } from "../policy.js";
 import type { PluginConfig } from "../config.js";
 import type { NormalizedInvocation } from "../parser.js";

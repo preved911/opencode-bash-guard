@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { resolveCandidatePaths, resolvePath } from "../paths.js";
-import { parseChain } from "../chain.js";
+import { parseCommand as parseChain } from "../parser.js";
 import type { NormalizedInvocation } from "../parser.js";
 
 function invocationOf(command: string): NormalizedInvocation {

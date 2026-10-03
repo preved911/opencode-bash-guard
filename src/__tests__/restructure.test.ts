@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { beforeExecute, handlePermissionAsk, clearStoredDecision } from "../enforce.js";
 import type { PluginConfig } from "../config.js";
 import type { RestructureConfig } from "../plugin-config.js";
-import { parseChain } from "../chain.js";
+import { parseCommand as parseChain } from "../parser.js";
 
 const baseConfig: PluginConfig = {
   bashRules: [

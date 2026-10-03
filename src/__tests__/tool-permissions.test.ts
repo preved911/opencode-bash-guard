@@ -4,7 +4,8 @@ import {
   matchToolPermissions,
   matchTokenPattern,
 } from "../config.js";
-import { parseChain, stripQuotePairs } from "../chain.js";
+import { parseCommand as parseChain } from "../parser.js";
+import { stripQuotePairs } from "../parser.js";
 import { beforeExecute, handlePermissionAsk, clearStoredDecision } from "../enforce.js";
 import type { PluginConfig } from "../config.js";
 import type { RestructureConfig } from "../plugin-config.js";

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { parseChain, parseChainPerLine, detectInlineScript, countScriptStatements } from "../chain.js";
+import { parseCommand as parseChain, parseCommandPerLine as parseChainPerLine } from "../parser.js";
+import { detectInlineScript, countScriptStatements } from "../parser.js";
 import type { NormalizedInvocation } from "../parser.js";
 
 describe("parseChain", () => {
