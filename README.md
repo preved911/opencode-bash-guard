@@ -144,7 +144,7 @@ opencode's `permission.bash` globs match the whole command string — they canno
         { "token": ["push", "--force"], "action": "deny" },
         { "token": ["push", "--force-with-lease"], "action": "allow" }
       ],
-      "flags": { "--force": 1, "--force-with-lease": 0 }
+      "flags": { "--force": 0, "--force-with-lease": 0 }
     },
     {
       // deny `get` against kube-system wherever the flag appears (flags are position-free)
