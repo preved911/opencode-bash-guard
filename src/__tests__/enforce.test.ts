@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { resolveSegment, resolveChain, beforeExecute, handlePermissionAsk, clearStoredDecision, checkComplexity, buildRejectionMessage } from "../enforce.js";
+import { beforeExecute, handlePermissionAsk, clearStoredDecision } from "../enforce.js";
+import { resolveSegment, resolveChain } from "../policy.js";
+import { checkComplexity, buildRejectionMessage } from "../readability.js";
 import type { PluginConfig } from "../config.js";
 import type { RestructureConfig } from "../plugin-config.js";
 import { parseChain } from "../chain.js";
