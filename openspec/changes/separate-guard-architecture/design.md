@@ -1,6 +1,6 @@
 ## Context
 
-See [proposal.md](proposal.md) for motivation. The current implementation spans shell parsing in `src/chain.ts`, native and plugin configuration in `src/config.ts` and `src/plugin-config.ts`, enforcement in `src/enforce.ts`, and hook wiring in `src/index.ts`. These layers currently exchange shell text, parsed segments, configuration, decisions, readability results, and callID state directly.
+See [proposal.md](proposal.md) for motivation. The current implementation spans shell parsing in `src/chain.ts`, path extraction in `src/paths.ts`, native and plugin configuration in `src/config.ts` and `src/plugin-config.ts`, enforcement in `src/enforce.ts`, and hook wiring in `src/index.ts`. These layers currently exchange shell text, parsed segments, configuration, decisions, readability results, and callID state directly. Path extraction currently reparses segment text, so its ownership must move to the normalized invocation boundary rather than remain a second shell parser.
 
 The refactor must retain the published matcherVersion 2 JSONC format, including comments and trailing commas, global then project deep-merge precedence, invalid-file degraded mode, and current structured argument matcher normalization. It must also retain current parser coverage, policy precedence, redirect and path handling, optional readability behavior, and dual-hook decision delivery.
 
@@ -9,9 +9,11 @@ The refactor must retain the published matcherVersion 2 JSONC format, including 
 **Goals:**
 
 - Define a parser boundary that converts shell input into normalized invocations while preserving segment ordering, argv, redirects, nesting data, parse errors, and source text needed by existing behavior.
+- Make normalized invocations carry syntactically extracted candidate path operands and redirect targets so policy evaluation does not reparse shell text.
 - Define a pure policy evaluator that receives normalized invocations plus effective policy and returns decisions without reading files, mutating hook output, or owning callID state.
 - Keep readability as a constraint applied to the evaluated result, preserving the current opt-in thresholds and ask-only rejection path.
 - Keep OpenCode integration in an adapter that loads configuration, calls the parser and evaluator, wraps commands when required, and transfers stored decisions from `tool.execute.before` to `permission.ask` by callID.
+- Preserve the number and trigger points of permission prompts per invocation and callID across allow, ask, deny, chained, nested, empty, and disabled paths.
 - Establish characterization tests before moving code, then require full behavioral parity after each extraction stage.
 
 **Non-Goals:**
@@ -25,13 +27,13 @@ The refactor must retain the published matcherVersion 2 JSONC format, including 
 
 ### Separate parsing from normalized invocations
 
-Introduce a parser-facing model that turns a bash command into normalized invocations. Each invocation carries the command text and name, quote-aware argv, redirects, and any parser-derived context needed for chain and readability evaluation. The parser remains responsible for shell syntax, command substitutions, meta-command bodies, depth, and parse failures.
+Introduce a parser-facing model that turns a bash command into normalized invocations. Each invocation carries the command text and name, quote-aware argv, redirects, candidate path operands, and any parser-derived context needed for chain and readability evaluation. The parser remains responsible for shell syntax, command substitutions, meta-command bodies, depth, parse failures, and syntactic candidate-path extraction. Path policy remains responsible for resolving those candidates against the working directory and applying edit and external-directory rules.
 
-This keeps AST details at the parsing boundary and prevents policy code from reparsing shell strings. Keeping policy evaluation text-driven was considered, but it would preserve the current coupling and risk inconsistent argv or redirect treatment.
+This keeps AST details at the parsing boundary and prevents `src/paths.ts` or policy code from reparsing shell strings. Keeping policy evaluation text-driven was considered, but it would preserve the current coupling and risk inconsistent argv, path, or redirect treatment.
 
 ### Make policy evaluation pure
 
-Move segment and chain decisions into pure functions over normalized invocations, working directory, and already-normalized effective policy. Preserve the current ordering: structured argument matches decide a matching invocation before glob evaluation, refinement and most-restrictive semantics remain unchanged, and path, redirect, and external-directory results combine with the existing precedence. Chain aggregation must keep deny over ask over allow, with all invocations required for a chain allow.
+Move segment and chain decisions into pure functions over normalized invocations, working directory, and already-normalized effective policy. Preserve the current ordering: structured argument matches decide a matching invocation before glob evaluation, refinement and most-restrictive semantics remain unchanged, and candidate path, redirect, and external-directory results combine with the existing precedence. Chain aggregation must keep deny over ask over allow, with all invocations required for a chain allow.
 
 The evaluator returns decision data rather than mutating a decision store or hook output. A stateful evaluator was considered, but it would make characterization and parity checks depend on OpenCode lifecycle details.
 
@@ -45,6 +47,8 @@ Embedding readability into parser or policy evaluation was considered. That woul
 
 Keep configuration discovery and parsing at initialization, then let the adapter build effective policy, invoke the parser, evaluator, and readability constraint, and translate the result into hook effects. The adapter alone owns command wrapping, throwing readability rejections, and callID decision storage and cleanup across `tool.execute.before` and `permission.ask`.
 
+The adapter must preserve prompt cardinality as an observable invariant: a refactored invocation must request permission at exactly the same trigger points and no more or fewer times than the current implementation. Decision state remains single-use per callID and is cleaned up on every terminal path, including errors and cancellations.
+
 Moving hook state into the evaluator was rejected because callIDs and hook output are OpenCode-specific. Keeping all behavior in the current enforcement module was rejected because it leaves the architectural boundary unclear.
 
 ### Preserve configuration loading and precedence
@@ -57,7 +61,9 @@ Replacing the loader or flattening project and global data earlier was considere
 
 - [Boundary changes alter a decision edge case] -> Add characterization fixtures for parser output, matcherVersion 2 JSONC merging, segment and chain decisions, readability outcomes, and hook handoff before extraction. Compare the extracted path against those fixtures.
 - [Normalized invocation loses parser detail] -> Include argv, redirects, command text, command name, per-line counts, parse status, and nesting data in the model, then cover substitutions, meta-commands, quoted arguments, redirects, and multiline input.
+- [Path extraction changes while removing the second parse] -> Characterize relative, absolute, home-relative, flag-like, external-directory, and redirect paths before moving candidate extraction into normalized invocations.
 - [Adapter extraction breaks callID cleanup or forced allow and deny] -> Test the full `tool.execute.before` to `permission.ask` sequence for ask, deny, argument-level allow, parse errors, and readability rejection.
+- [Adapter extraction changes prompt frequency] -> Assert prompt count and trigger points for simple, chained, nested, empty, disabled, allow, ask, deny, error, and cancellation paths.
 - [Incremental moves create temporary duplicate logic] -> Move one responsibility at a time and remove the old path only after parity tests pass.
 
 ## Migration Plan
