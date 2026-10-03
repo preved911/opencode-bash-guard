@@ -3,7 +3,7 @@ import { parseConfig, matchBashPermission, matchExternalDirectory, matchToolPerm
 import { parseChain } from "../chain.js";
 import { resolveSegment, resolveChain } from "../enforce.js";
 import type { PluginConfig } from "../config.js";
-import type { ChainSegment } from "../chain.js";
+import type { NormalizedInvocation } from "../parser.js";
 
 /**
  * Characterization tests (task 1.3): lock native configuration parsing and pure
@@ -13,11 +13,15 @@ import type { ChainSegment } from "../chain.js";
  * fallback, candidate paths, redirects, and chain aggregation.
  */
 
-const argvOf = (command: string): string[] => parseChain(command).segments[0]?.argv ?? command.split(/\s+/);
+const argvOf = (command: string): string[] => parseChain(command).invocations[0]?.argv ?? command.split(/\s+/);
 
-function seg(command: string, redirects: ChainSegment["redirects"] = []): ChainSegment {
-  return { command, commandName: command.split(/\s+/)[0] ?? "", argv: command.split(/\s+/), redirects };
+function seg(command: string, redirects: NormalizedInvocation["redirects"] = []): NormalizedInvocation {
+  const parsed = parseChain(command).invocations[0];
+  if (!parsed) throw new Error(`unparseable fixture: ${command}`);
+  return redirects.length > 0 ? { ...parsed, redirects } : parsed;
 }
+
+const inv = seg;
 
 describe("characterization: native permission.bash parsing", () => {
   it("object form parses patterns in declaration order", () => {
@@ -221,7 +225,7 @@ describe("characterization: segment resolution (glob fallback + paths + redirect
       ...defaultConfig,
       bashRules: [{ pattern: "*", action: "ask" }, { pattern: "cat *", action: "allow" }],
     };
-    const { action } = resolveSegment("cat /etc/passwd", "cat", "/project", config);
+    const { action } = resolveSegment(inv("cat /etc/passwd"), "/project", config);
     expect(action).toBe("ask");
   });
 
@@ -234,7 +238,7 @@ describe("characterization: segment resolution (glob fallback + paths + redirect
       toolPermissions: [],
       enabled: true,
     };
-    const { action } = resolveSegment("cat /etc/passwd", "cat", "/project", config);
+    const { action } = resolveSegment(inv("cat /etc/passwd"), "/project", config);
     expect(action).toBe("ask");
   });
 
@@ -247,9 +251,9 @@ describe("characterization: segment resolution (glob fallback + paths + redirect
       toolPermissions: [],
       enabled: true,
     };
-    const { action } = resolveSegment("ls", "ls", "/project", config, [
+    const { action } = resolveSegment(inv("ls", [
       { operator: ">&", target: "1", fileDescriptor: 2, wellKnown: true },
-    ]);
+    ]), "/project", config);
     expect(action).toBe("allow");
   });
 
@@ -262,9 +266,9 @@ describe("characterization: segment resolution (glob fallback + paths + redirect
       toolPermissions: [],
       enabled: true,
     };
-    const { action } = resolveSegment("ls", "ls", "/project", config, [
+    const { action } = resolveSegment(inv("ls", [
       { operator: ">", target: "output.txt", fileDescriptor: undefined, wellKnown: false },
-    ]);
+    ]), "/project", config);
     expect(action).toBe("allow");
   });
 
@@ -277,15 +281,15 @@ describe("characterization: segment resolution (glob fallback + paths + redirect
       toolPermissions: [],
       enabled: true,
     };
-    const { action } = resolveSegment("ls", "ls", "/project", config, [
+    const { action } = resolveSegment(inv("ls", [
       { operator: ">", target: "/etc/passwd", fileDescriptor: undefined, wellKnown: false },
-    ]);
+    ]), "/project", config);
     expect(action).toBe("deny");
   });
 
   it("forcedAskTools overrides everything for that executable", () => {
     const config: PluginConfig = { ...defaultConfig, forcedAskTools: ["git"] };
-    const { action } = resolveSegment("git status", "git", "/project", config);
+    const { action } = resolveSegment(inv("git status"), "/project", config);
     expect(action).toBe("ask");
   });
 
@@ -295,7 +299,7 @@ describe("characterization: segment resolution (glob fallback + paths + redirect
       bashRules: [{ pattern: "*", action: "ask" }],
       toolPermissions: [{ tool: "curl", args: [{ token: "-X", pattern: "GET", action: "allow" }], flags: { "-X": 1 } }],
     };
-    const { action, allowFromArgsRule } = resolveSegment("curl -X GET https://api.com", "curl", "/project", config);
+    const { action, allowFromArgsRule } = resolveSegment(inv("curl -X GET https://api.com"), "/project", config);
     expect(action).toBe("allow");
     expect(allowFromArgsRule).toBe(true);
   });

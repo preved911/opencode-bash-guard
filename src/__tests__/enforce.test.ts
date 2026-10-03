@@ -3,7 +3,14 @@ import { resolveSegment, resolveChain, beforeExecute, handlePermissionAsk, clear
 import type { PluginConfig } from "../config.js";
 import type { RestructureConfig } from "../plugin-config.js";
 import { parseChain } from "../chain.js";
-import type { ChainSegment } from "../chain.js";
+import type { NormalizedInvocation, RedirectInfo } from "../parser.js";
+
+/** Build a normalized invocation fixture through the parser boundary. */
+function inv(command: string, redirects: RedirectInfo[] = []): NormalizedInvocation {
+  const parsed = parseChain(command).invocations[0];
+  if (!parsed) throw new Error(`unparseable fixture: ${command}`);
+  return redirects.length > 0 ? { ...parsed, redirects } : parsed;
+}
 
 const defaultConfig: PluginConfig = {
   bashRules: [
@@ -22,18 +29,18 @@ const defaultConfig: PluginConfig = {
 
 describe("resolveSegment", () => {
   it("bash deny overrides everything", () => {
-    const { action } = resolveSegment("sudo rm -rf /", "sudo rm -rf /", "/project", defaultConfig);
+    const { action } = resolveSegment(inv("sudo rm -rf /"), "/project", defaultConfig);
     expect(action).toBe("deny");
   });
 
   it("external_directory violation triggers its action", () => {
-    const { action } = resolveSegment("cat /etc/passwd", "cat /etc/passwd", "/project", defaultConfig);
+    const { action } = resolveSegment(inv("cat /etc/passwd"), "/project", defaultConfig);
     const configNoMatch: PluginConfig = {
       ...defaultConfig,
       bashRules: [{ pattern: "*", action: "ask" }],
       editRules: [],
     };
-    const { action: act } = resolveSegment("cat /etc/passwd", "cat", "/project", configNoMatch);
+    const { action: act } = resolveSegment(inv("cat /etc/passwd"), "/project", configNoMatch);
     expect(act).not.toBeNull();
   });
 
@@ -46,7 +53,7 @@ describe("resolveSegment", () => {
             toolPermissions: [],
       enabled: true,
     };
-    const { action } = resolveSegment("cat /etc/passwd", "cat", "/project", config);
+    const { action } = resolveSegment(inv("cat /etc/passwd"), "/project", config);
     expect(action).toBe("deny");
   });
 
@@ -59,7 +66,7 @@ describe("resolveSegment", () => {
             toolPermissions: [],
       enabled: true,
     };
-    const { action } = resolveSegment("ls", "ls", "/", config);
+    const { action } = resolveSegment(inv("ls"), "/", config);
     expect(action).toBeNull();
   });
 });
@@ -68,8 +75,8 @@ describe("resolveChain", () => {
   it("all segments allowed — chain let through", () => {
     const { action: chain } = resolveChain(
       [
-        { command: "git status", commandName: "git", redirects: [], argv: [] },
-        { command: "git log", commandName: "git", redirects: [], argv: [] },
+        inv("git status"),
+        inv("git log"),
       ],
       "/project",
       defaultConfig,
@@ -88,8 +95,8 @@ describe("resolveChain", () => {
     };
     const { action: chain } = resolveChain(
       [
-        { command: "git status", commandName: "git", redirects: [], argv: [] },
-        { command: "rm -rf /", commandName: "rm", redirects: [], argv: [] },
+        inv("git status"),
+        inv("rm -rf /"),
       ],
       "/project",
       config,
@@ -100,8 +107,8 @@ describe("resolveChain", () => {
   it("deny in any segment denies whole chain", () => {
     const { action: chain } = resolveChain(
       [
-        { command: "git status", commandName: "git", redirects: [], argv: [] },
-        { command: "sudo rm -rf /", commandName: "sudo", redirects: [], argv: [] },
+        inv("git status"),
+        inv("sudo rm -rf /"),
       ],
       "/project",
       defaultConfig,
@@ -111,7 +118,7 @@ describe("resolveChain", () => {
 
   it("single segment with no issues", () => {
     const { action: chain } = resolveChain(
-      [{ command: "git status", commandName: "git", redirects: [], argv: [] }],
+      [inv("git status")],
       "/project",
       defaultConfig,
     );
@@ -435,9 +442,9 @@ describe("redirect enforcement", () => {
             toolPermissions: [],
       enabled: true,
     };
-    const { action } = resolveSegment("ls", "ls", cwd, config, [
+    const { action } = resolveSegment(inv("ls", [
       { operator: ">&", target: "1", fileDescriptor: 2, wellKnown: true },
-    ]);
+    ]), cwd, config);
     expect(action).toBe("allow");
   });
 
@@ -450,9 +457,9 @@ describe("redirect enforcement", () => {
             toolPermissions: [],
       enabled: true,
     };
-    const { action } = resolveSegment("ls", "ls", cwd, config, [
+    const { action } = resolveSegment(inv("ls", [
       { operator: ">", target: "/dev/null", fileDescriptor: undefined, wellKnown: true },
-    ]);
+    ]), cwd, config);
     expect(action).toBe("allow");
   });
 
@@ -465,9 +472,9 @@ describe("redirect enforcement", () => {
             toolPermissions: [],
       enabled: true,
     };
-    const { action } = resolveSegment("ls", "ls", cwd, config, [
+    const { action } = resolveSegment(inv("ls", [
       { operator: ">", target: "output.txt", fileDescriptor: undefined, wellKnown: false },
-    ]);
+    ]), cwd, config);
     expect(action).toBe("allow");
   });
 
@@ -480,9 +487,9 @@ describe("redirect enforcement", () => {
             toolPermissions: [],
       enabled: true,
     };
-    const { action } = resolveSegment("ls", "ls", cwd, config, [
+    const { action } = resolveSegment(inv("ls", [
       { operator: ">", target: "/etc/passwd", fileDescriptor: undefined, wellKnown: false },
-    ]);
+    ]), cwd, config);
     expect(action).toBe("deny");
   });
 
@@ -495,9 +502,9 @@ describe("redirect enforcement", () => {
             toolPermissions: [],
       enabled: true,
     };
-    const { action } = resolveSegment("ls", "ls", cwd, config, [
+    const { action } = resolveSegment(inv("ls", [
       { operator: ">", target: "/tmp/foo", fileDescriptor: undefined, wellKnown: false },
-    ]);
+    ]), cwd, config);
     expect(action).toBe("deny");
   });
 
@@ -510,9 +517,9 @@ describe("redirect enforcement", () => {
             toolPermissions: [],
       enabled: true,
     };
-    const { action } = resolveSegment("ls", "ls", cwd, config, [
+    const { action } = resolveSegment(inv("ls", [
       { operator: ">", target: "out.txt", fileDescriptor: undefined, wellKnown: false },
-    ]);
+    ]), cwd, config);
     expect(action).toBe("ask");
   });
 
@@ -525,9 +532,9 @@ describe("redirect enforcement", () => {
             toolPermissions: [],
       enabled: true,
     };
-    const { action } = resolveSegment("sudo rm -rf /", "sudo rm -rf /", cwd, config, [
+    const { action } = resolveSegment(inv("sudo rm -rf /", [
       { operator: ">", target: "out.txt", fileDescriptor: undefined, wellKnown: false },
-    ]);
+    ]), cwd, config);
     expect(action).toBe("deny");
   });
 });

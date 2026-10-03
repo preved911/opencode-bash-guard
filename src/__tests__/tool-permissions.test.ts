@@ -11,7 +11,7 @@ import type { RestructureConfig } from "../plugin-config.js";
 
 const argvOf = (command: string): string[] => {
   const chain = parseChain(command);
-  return chain.segments[0]?.argv ?? command.split(/\s+/);
+  return chain.invocations[0]?.argv ?? command.split(/\s+/);
 };
 
 describe("validateToolPermissions", () => {

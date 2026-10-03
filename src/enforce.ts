@@ -1,9 +1,9 @@
 import type { PluginConfig } from "./config.js";
 import { matchBashPermission, matchExternalDirectory, matchToolPermissions } from "./config.js";
-import { parseChain, parseChainPerLine, detectInlineScript } from "./chain.js";
-import type { ChainSegment, ChainResult, RedirectInfo } from "./chain.js";
+import { parseCommand, parseCommandPerLine, detectInlineScript } from "./parser.js";
+import type { NormalizedInvocation, ParsedCommand, RedirectInfo } from "./parser.js";
 import type { RestructureConfig } from "./plugin-config.js";
-import { extractPaths } from "./paths.js";
+import { resolveCandidatePaths } from "./paths.js";
 import path from "path";
 
 export type ChainAction = "allow" | "ask" | "deny" | null;
@@ -64,15 +64,8 @@ export interface SegmentResolution {
   allowFromArgsRule: boolean;
 }
 
-export function resolveSegment(
-  segment: string,
-  segmentName: string,
-  cwd: string,
-  config: PluginConfig,
-  redirects?: RedirectInfo[],
-  argv?: string[],
-): SegmentResolution {
-  const tokens = argv ?? segment.split(/\s+/).filter((t) => t.length > 0);
+export function resolveSegment(invocation: NormalizedInvocation, cwd: string, config: PluginConfig): SegmentResolution {
+  const tokens = invocation.argv;
 
   // Scoped ask (invalid/unmigrated args config for this executable) overrides everything.
   if (config.forcedAskTools?.includes(tokens[0])) {
@@ -85,9 +78,9 @@ export function resolveSegment(
     return { action: argsAction, allowFromArgsRule: argsAction === "allow" };
   }
 
-  const bashAction = matchBashPermission(segment, config.bashRules);
+  const bashAction = matchBashPermission(invocation.command, config.bashRules);
 
-  const paths = extractPaths(segment, cwd);
+  const paths = resolveCandidatePaths(invocation, cwd);
   let edAction: "ask" | "allow" | "deny" | null = null;
 
   for (const p of paths) {
@@ -101,8 +94,8 @@ export function resolveSegment(
 
   let combined = combineActions(bashAction, edAction);
 
-  if (redirects && redirects.length > 0) {
-    const redirectAction = resolveRedirectTargets(redirects, cwd, config);
+  if (invocation.redirects.length > 0) {
+    const redirectAction = resolveRedirectTargets(invocation.redirects, cwd, config);
     combined = combineActions(combined, redirectAction);
   }
 
@@ -115,12 +108,12 @@ export interface ChainResolution {
   allowFromArgsRule: boolean;
 }
 
-export function resolveChain(segments: ChainSegment[], cwd: string, config: PluginConfig): ChainResolution {
+export function resolveChain(invocations: NormalizedInvocation[], cwd: string, config: PluginConfig): ChainResolution {
   const segmentActions: ChainAction[] = [];
   let allowFromArgsRule = false;
 
-  for (const seg of segments) {
-    const resolution = resolveSegment(seg.command, seg.commandName, cwd, config, seg.redirects, seg.argv);
+  for (const inv of invocations) {
+    const resolution = resolveSegment(inv, cwd, config);
     segmentActions.push(resolution.action);
     if (resolution.action === "allow" && resolution.allowFromArgsRule) {
       allowFromArgsRule = true;
@@ -158,11 +151,11 @@ export interface ComplexityViolation {
  * Segment limit applies per line (single-line = one line); depth applies to the
  * whole command in every shape; inline-script statement count applies per script.
  */
-export function checkComplexity(command: string, chain: ChainResult, restructure: RestructureConfig): ComplexityViolation | null {
+export function checkComplexity(command: string, chain: ParsedCommand, restructure: RestructureConfig): ComplexityViolation | null {
   if (!restructure.enabled) return null;
 
   let worstInline: { interpreter: string; statementCount: number } | null = null;
-  for (const seg of chain.segments) {
+  for (const seg of chain.invocations) {
     const info = detectInlineScript(seg);
     if (info && info.statementCount > restructure.maxSegments) {
       if (!worstInline || info.statementCount > worstInline.statementCount) {
@@ -176,7 +169,7 @@ export function checkComplexity(command: string, chain: ChainResult, restructure
 
   const multiLine = command.includes("\n");
   if (multiLine) {
-    const perLine = parseChainPerLine(command);
+    const perLine = parseCommandPerLine(command);
     if (perLine.worstLine && perLine.worstLine.segmentCount > restructure.maxSegments) {
       return {
         kind: "segments",
@@ -184,8 +177,8 @@ export function checkComplexity(command: string, chain: ChainResult, restructure
         worstLine: perLine.worstLine.lineNumber,
       };
     }
-  } else if (chain.segments.length > restructure.maxSegments) {
-    return { kind: "segments", segmentCount: chain.segments.length };
+  } else if (chain.invocations.length > restructure.maxSegments) {
+    return { kind: "segments", segmentCount: chain.invocations.length };
   }
 
   if (chain.maxDepth > restructure.maxDepth) {
@@ -195,7 +188,7 @@ export function checkComplexity(command: string, chain: ChainResult, restructure
   return null;
 }
 
-export function buildRejectionMessage(violation: ComplexityViolation, chain: ChainResult, command: string): string {
+export function buildRejectionMessage(violation: ComplexityViolation, chain: ParsedCommand, command: string): string {
   if (violation.kind === "inline-script") {
     return (
       `[opencode-bash-guard] Complex inline script rejected (${violation.interpreter}: ${violation.statementCount} statements).\n` +
@@ -237,8 +230,8 @@ export function beforeExecute(
     return noAction;
   }
 
-  const chain = parseChain(command);
-  if (chain.parseError || chain.segments.length === 0) {
+  const chain = parseCommand(command);
+  if (chain.parseError || chain.invocations.length === 0) {
     decisionStore.set(callID, { action: "deny" });
     return { shouldWrap: true, chainAction: "deny", rejectionMessage: null };
   }
@@ -250,7 +243,7 @@ export function beforeExecute(
     return { shouldWrap: true, chainAction: "ask", rejectionMessage: null };
   }
 
-  const { action, allowFromArgsRule } = resolveChain(chain.segments, cwd, config);
+  const { action, allowFromArgsRule } = resolveChain(chain.invocations, cwd, config);
 
   if (action === null || action === "allow") {
     if (action === "allow" && allowFromArgsRule) {

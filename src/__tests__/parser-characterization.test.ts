@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { parseChain, parseChainPerLine, detectInlineScript, countScriptStatements, stripQuotePairs, extractArgv } from "../chain.js";
-import { extractPaths, extractPotentialPaths } from "../paths.js";
-import type { ChainSegment } from "../chain.js";
+import { resolveCandidatePaths } from "../paths.js";
+import type { NormalizedInvocation } from "../parser.js";
 
 /**
  * Characterization tests (task 1.1): lock current parser + path-extraction behavior
@@ -12,30 +12,30 @@ import type { ChainSegment } from "../chain.js";
 describe("characterization: normalized segment order and argv", () => {
   it("segments appear in source order across &&, ||, ; and |", () => {
     const result = parseChain("git status && npm test || cat log.txt; ls | sort");
-    expect(result.segments.map((s) => s.commandName)).toEqual(["git", "npm", "cat", "ls", "sort"]);
-    expect(result.topLevelSegments.map((s) => s.commandName)).toEqual(["git", "npm", "cat", "ls", "sort"]);
+    expect(result.invocations.map((s) => s.commandName)).toEqual(["git", "npm", "cat", "ls", "sort"]);
+    expect(result.topLevelInvocations.map((s) => s.commandName)).toEqual(["git", "npm", "cat", "ls", "sort"]);
   });
 
   it("quote-aware argv: quoted whitespace stays one token, quote pairs stripped", () => {
     const result = parseChain('echo "a b" --force""');
-    expect(result.segments[0].argv).toEqual(["echo", "a b", "--force"]);
+    expect(result.invocations[0].argv).toEqual(["echo", "a b", "--force"]);
   });
 
   it("argv excludes redirect targets", () => {
     const result = parseChain("ls > /tmp/out.txt");
-    expect(result.segments[0].argv).toEqual(["ls"]);
+    expect(result.invocations[0].argv).toEqual(["ls"]);
   });
 
   it("command text includes redirects verbatim", () => {
     const result = parseChain("echo test 2>/dev/null");
-    expect(result.segments[0].command).toBe("echo test 2>/dev/null");
+    expect(result.invocations[0].command).toBe("echo test 2>/dev/null");
   });
 
   it("empty and whitespace-only input produce empty results without parse error", () => {
     for (const cmd of ["", "   ", "\n"]) {
       const result = parseChain(cmd);
-      expect(result.segments).toHaveLength(0);
-      expect(result.topLevelSegments).toHaveLength(0);
+      expect(result.invocations).toHaveLength(0);
+      expect(result.topLevelInvocations).toHaveLength(0);
       expect(result.parseError).toBe(false);
       expect(result.errors).toHaveLength(0);
       expect(result.maxDepth).toBe(0);
@@ -52,83 +52,87 @@ describe("characterization: normalized segment order and argv", () => {
 
   it("extractArgv is exported and quote-aware", () => {
     const result = parseChain('git push "--force" origin main');
-    expect(result.segments[0].argv).toEqual(["git", "push", "--force", "origin", "main"]);
+    expect(result.invocations[0].argv).toEqual(["git", "push", "--force", "origin", "main"]);
   });
 });
 
 describe("characterization: candidate path operands (parser boundary fixtures)", () => {
+  function candidatesOf(command: string, cwd: string) {
+    const parsed = parseChain(command).invocations[0];
+    if (!parsed) throw new Error(`unparseable fixture: ${command}`);
+    return resolveCandidatePaths(parsed, cwd);
+  }
+
   it("relative path resolves against cwd", () => {
-    const paths = extractPaths("grep -r pattern ./src", "/project");
+    const paths = candidatesOf("grep -r pattern ./src", "/project");
     const srcPath = paths.find((p) => p.original === "./src");
     expect(srcPath).toBeDefined();
     expect(srcPath!.resolved).toBe("/project/src");
   });
 
   it("absolute path resolves to itself", () => {
-    const paths = extractPaths("cat /etc/hosts", "/");
+    const paths = candidatesOf("cat /etc/hosts", "/");
     const etcPath = paths.find((p) => p.original === "/etc/hosts");
     expect(etcPath).toBeDefined();
     expect(etcPath!.resolved).toBe("/etc/hosts");
   });
 
   it("home-relative path resolves against homedir", () => {
-    const paths = extractPaths("cat ~/.ssh/config", "/");
+    const paths = candidatesOf("cat ~/.ssh/config", "/");
     const tildePath = paths.find((p) => p.original === "~/.ssh/config");
     expect(tildePath).toBeDefined();
     expect(tildePath!.resolved).toContain("/.ssh/config");
   });
 
   it("flag-like tokens are excluded from candidates", () => {
-    expect(extractPaths("ls -la -r", "/")).toHaveLength(0);
-    expect(extractPotentialPaths("ls -la -r")).toHaveLength(0);
+    expect(candidatesOf("ls -la -r", "/")).toHaveLength(0);
+    expect(parseChain("ls -la -r").invocations[0].candidatePaths).toHaveLength(0);
   });
 
   it("non-flag tokens are kept as candidates", () => {
-    expect(extractPotentialPaths("cat /etc/passwd")).toContain("/etc/passwd");
+    expect(parseChain("cat /etc/passwd").invocations[0].candidatePaths).toContain("/etc/passwd");
   });
 
   it("command with no arguments has no candidates", () => {
-    expect(extractPaths("ls", "/")).toHaveLength(0);
+    expect(candidatesOf("ls", "/")).toHaveLength(0);
   });
 
   it("redirect targets are not candidate path operands (they are redirects)", () => {
-    const paths = extractPaths("ls > /tmp/out.txt", "/");
+    const paths = candidatesOf("ls > /tmp/out.txt", "/");
     expect(paths.find((p) => p.original === "/tmp/out.txt")).toBeUndefined();
   });
 
-  it("multiline input: candidates come from every line's commands", () => {
-    const paths = extractPaths("cat /etc/hosts\ncat /etc/passwd", "/");
-    expect(paths.map((p) => p.original)).toContain("/etc/hosts");
-    expect(paths.map((p) => p.original)).toContain("/etc/passwd");
+  it("candidates are unresolved until resolution against cwd", () => {
+    expect(parseChain("cat /etc/passwd").invocations[0].candidatePaths).toEqual(["/etc/passwd"]);
   });
 });
 
 describe("characterization: redirects", () => {
   it("fd redirect is well-known", () => {
     const result = parseChain("ls -la 2>&1");
-    expect(result.segments[0].redirects).toEqual([
+    expect(result.invocations[0].redirects).toEqual([
       { operator: ">&", target: "1", fileDescriptor: 2, wellKnown: true },
     ]);
   });
 
   it("/dev/null redirect is well-known", () => {
     const result = parseChain("ls -la > /dev/null");
-    expect(result.segments[0].redirects[0].wellKnown).toBe(true);
+    expect(result.invocations[0].redirects[0].wellKnown).toBe(true);
   });
 
   it("numeric-only target is well-known", () => {
     const result = parseChain("ls 2> 1");
-    expect(result.segments[0].redirects[0].wellKnown).toBe(true);
+    expect(result.invocations[0].redirects[0].wellKnown).toBe(true);
   });
 
   it("heredoc is well-known", () => {
     const result = parseChain("cat << EOF");
-    expect(result.segments[0].redirects[0].wellKnown).toBe(true);
+    expect(result.invocations[0].redirects[0].wellKnown).toBe(true);
   });
 
   it("file redirect is not well-known", () => {
     const result = parseChain("ls -la > /tmp/out.txt");
-    expect(result.segments[0].redirects[0]).toEqual({
+    expect(result.invocations[0].redirects[0]).toEqual({
       operator: ">",
       target: "/tmp/out.txt",
       fileDescriptor: undefined,
@@ -138,50 +142,50 @@ describe("characterization: redirects", () => {
 
   it("statement-level redirects attach to the segment", () => {
     const result = parseChain("echo hello > file.txt && cat file.txt");
-    expect(result.segments[0].redirects).toHaveLength(1);
-    expect(result.segments[0].redirects[0].target).toBe("file.txt");
-    expect(result.segments[1].redirects).toHaveLength(0);
+    expect(result.invocations[0].redirects).toHaveLength(1);
+    expect(result.invocations[0].redirects[0].target).toBe("file.txt");
+    expect(result.invocations[1].redirects).toHaveLength(0);
   });
 });
 
 describe("characterization: substitutions and meta-command bodies", () => {
   it("$() substitution commands are extracted as segments", () => {
     const result = parseChain('cat $(find . -name "*.txt")');
-    expect(result.segments.map((s) => s.commandName)).toContain("find");
-    expect(result.segments.map((s) => s.commandName)).toContain("cat");
+    expect(result.invocations.map((s) => s.commandName)).toContain("find");
+    expect(result.invocations.map((s) => s.commandName)).toContain("cat");
   });
 
   it("backtick substitution commands are extracted", () => {
     const result = parseChain("echo `date`");
-    expect(result.segments.map((s) => s.commandName)).toContain("date");
+    expect(result.invocations.map((s) => s.commandName)).toContain("date");
   });
 
   it("multiple substitutions all extracted", () => {
     const result = parseChain("diff $(ls dir1) $(ls dir2)");
-    expect(result.segments.filter((s) => s.commandName === "ls")).toHaveLength(2);
+    expect(result.invocations.filter((s) => s.commandName === "ls")).toHaveLength(2);
   });
 
   it("eval body commands are extracted", () => {
     const result = parseChain('eval "rm -rf /"');
-    expect(result.segments.map((s) => s.commandName)).toContain("eval");
-    expect(result.segments.map((s) => s.commandName)).toContain("rm");
+    expect(result.invocations.map((s) => s.commandName)).toContain("eval");
+    expect(result.invocations.map((s) => s.commandName)).toContain("rm");
   });
 
   it("sh -c body commands are extracted", () => {
     const result = parseChain('sh -c "rm -rf /"');
-    expect(result.segments.map((s) => s.commandName)).toContain("rm");
+    expect(result.invocations.map((s) => s.commandName)).toContain("rm");
   });
 
   it("bash -c nested chain bodies are extracted", () => {
     const result = parseChain('bash -c "cd /tmp && rm -rf ."');
-    expect(result.segments.map((s) => s.commandName)).toContain("bash");
-    expect(result.segments.map((s) => s.commandName)).toContain("rm");
+    expect(result.invocations.map((s) => s.commandName)).toContain("bash");
+    expect(result.invocations.map((s) => s.commandName)).toContain("rm");
   });
 
   it("chaining operators inside quotes do not split", () => {
     const result = parseChain('echo "hello && world"');
-    expect(result.segments).toHaveLength(1);
-    expect(result.segments[0].commandName).toBe("echo");
+    expect(result.invocations).toHaveLength(1);
+    expect(result.invocations[0].commandName).toBe("echo");
   });
 });
 
@@ -200,7 +204,7 @@ describe("characterization: parse errors", () => {
 
   it("parse error does not lose already-extracted segments", () => {
     const result = parseChain('echo "unbalanced');
-    expect(result.segments.length).toBeGreaterThanOrEqual(0);
+    expect(result.invocations.length).toBeGreaterThanOrEqual(0);
   });
 });
 
@@ -261,8 +265,8 @@ describe("characterization: nesting depth", () => {
 });
 
 describe("characterization: inline-script detection", () => {
-  function seg(command: string, redirects: ChainSegment["redirects"] = []): ChainSegment {
-    return { command, commandName: command.split(/\s+/)[0] ?? "", argv: command.split(/\s+/), redirects };
+  function seg(command: string, redirects: NormalizedInvocation["redirects"] = []): NormalizedInvocation {
+    return { command, commandName: command.split(/\s+/)[0] ?? "", argv: command.split(/\s+/), redirects, candidatePaths: [] };
   }
 
   it("python3 -c counts ;-separated statements", () => {

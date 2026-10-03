@@ -15,7 +15,7 @@ function file(p: string, content: string): PluginConfigFile {
   return { path: p, content };
 }
 
-const argvOf = (command: string): string[] => parseChain(command).segments[0]?.argv ?? command.split(/\s+/);
+const argvOf = (command: string): string[] => parseChain(command).invocations[0]?.argv ?? command.split(/\s+/);
 
 afterEach(() => {
   vi.restoreAllMocks();
