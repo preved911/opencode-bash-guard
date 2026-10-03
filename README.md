@@ -142,7 +142,7 @@ opencode's `permission.bash` globs match the whole command string — they canno
       "args": [
         { "token": ["push"], "action": "allow" },
         { "token": ["push", "--force"], "action": "deny" },
-        { "token": ["push", "--force-with-lease"], action: "allow" }
+        { "token": ["push", "--force-with-lease"], "action": "allow" }
       ],
       "flags": { "--force": 1, "--force-with-lease": 0 }
     },
