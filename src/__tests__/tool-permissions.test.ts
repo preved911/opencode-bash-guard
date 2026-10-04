@@ -4,14 +4,15 @@ import {
   matchToolPermissions,
   matchTokenPattern,
 } from "../config.js";
-import { parseChain, stripQuotePairs } from "../chain.js";
+import { parseCommand as parseChain } from "../parser.js";
+import { stripQuotePairs } from "../parser.js";
 import { beforeExecute, handlePermissionAsk, clearStoredDecision } from "../enforce.js";
 import type { PluginConfig } from "../config.js";
 import type { RestructureConfig } from "../plugin-config.js";
 
 const argvOf = (command: string): string[] => {
   const chain = parseChain(command);
-  return chain.segments[0]?.argv ?? command.split(/\s+/);
+  return chain.invocations[0]?.argv ?? command.split(/\s+/);
 };
 
 describe("validateToolPermissions", () => {

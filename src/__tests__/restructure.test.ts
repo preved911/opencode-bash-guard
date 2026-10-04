@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { beforeExecute, handlePermissionAsk, clearStoredDecision } from "../enforce.js";
 import type { PluginConfig } from "../config.js";
 import type { RestructureConfig } from "../plugin-config.js";
-import { parseChain } from "../chain.js";
+import { parseCommand as parseChain } from "../parser.js";
 
 const baseConfig: PluginConfig = {
   bashRules: [
@@ -28,7 +28,7 @@ describe("restructure integration", () => {
   it("4.1 multi-line re-issue: 4-line script parses into 4 segments, each checked independently", () => {
     const cmd = "git status\ngit log\ngit diff\nrm -rf /tmp/x";
     const chain = parseChain(cmd);
-    expect(chain.segments.map((s) => s.commandName)).toEqual(["git", "git", "git", "rm"]);
+    expect(chain.invocations.map((s) => s.commandName)).toEqual(["git", "git", "git", "rm"]);
 
     const result = beforeExecute("Bash", "integration", "/project", { command: cmd }, baseConfig, enabled);
     expect(result.rejectionMessage).toBeNull();

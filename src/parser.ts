@@ -8,16 +8,32 @@ export interface RedirectInfo {
   wellKnown: boolean;
 }
 
-export interface ChainSegment {
+/**
+ * Parser-boundary output unit: one normalized invocation.
+ * Carries everything policy and readability evaluation need, so neither
+ * reparses shell text: prompt-visible command text, quote-aware argv,
+ * redirects, and syntactically extracted candidate path operands.
+ */
+export interface NormalizedInvocation {
+  /** Reconstructed command text (name + suffix + redirects), as shown in permission prompts. */
   command: string;
+  /** First token, quote pairs stripped; empty when the command has no name. */
   commandName: string;
+  /** Quote-aware argv: command name + suffix words with matched quote pairs stripped. */
   argv: string[];
+  /** Command-level and statement-level redirects attached to this invocation. */
   redirects: RedirectInfo[];
+  /**
+   * Syntactic candidate path operands: suffix words that do not start with `-`.
+   * Unresolved — path policy resolves them against the working directory.
+   */
+  candidatePaths: string[];
 }
 
-export interface ChainResult {
-  segments: ChainSegment[];
-  topLevelSegments: ChainSegment[];
+export interface ParsedCommand {
+  /** All invocations in evaluation order: top-level, then nested substitutions, then meta-command bodies. */
+  invocations: NormalizedInvocation[];
+  topLevelInvocations: NormalizedInvocation[];
   parseError: boolean;
   errors: string[];
   /**
@@ -132,7 +148,7 @@ export function extractArgv(cmd: Command): string[] {
   return parts;
 }
 
-function buildSegment(cmd: Command, stmtRedirects: Redirect[]): ChainSegment {
+function buildInvocation(cmd: Command, stmtRedirects: Redirect[]): NormalizedInvocation {
   const cmdRedirects = (cmd.redirects ?? []).map(redirectToInfo);
   const statementRedirects = (stmtRedirects ?? []).map(redirectToInfo);
   return {
@@ -140,24 +156,25 @@ function buildSegment(cmd: Command, stmtRedirects: Redirect[]): ChainSegment {
     commandName: getCommandName(cmd),
     argv: extractArgv(cmd),
     redirects: [...cmdRedirects, ...statementRedirects],
+    candidatePaths: cmd.suffix.filter((w) => !w.text.startsWith("-")).map((w) => w.text),
   };
 }
 
-function extractCommandsFromScript(script: Script): ChainSegment[] {
-  const segments: ChainSegment[] = [];
+function extractInvocationsFromScript(script: Script): NormalizedInvocation[] {
+  const invocations: NormalizedInvocation[] = [];
   for (const stmt of script.commands) {
     const cmds = extractCommandsFromNode(stmt.command);
     for (const cmd of cmds) {
       if (cmd.type === "Command") {
-        segments.push(buildSegment(cmd, stmt.redirects));
+        invocations.push(buildInvocation(cmd, stmt.redirects));
       }
     }
   }
-  return segments;
+  return invocations;
 }
 
-function extractNestedCommands(script: Script): ChainSegment[] {
-  const nested: ChainSegment[] = [];
+function extractNestedInvocations(script: Script): NormalizedInvocation[] {
+  const nested: NormalizedInvocation[] = [];
   function walkNode(node: Node): void {
     if (node.type === "Command") {
       for (const word of (node as Command).suffix) {
@@ -166,9 +183,8 @@ function extractNestedCommands(script: Script): ChainSegment[] {
             if (part.type === "CommandExpansion") {
               const ce = part as CommandExpansionPart;
               if (ce.script) {
-                const segs = extractCommandsFromScript(ce.script);
-                for (const seg of segs) {
-                  nested.push(seg);
+                for (const inv of extractInvocationsFromScript(ce.script)) {
+                  nested.push(inv);
                 }
               }
             }
@@ -253,13 +269,13 @@ function computeNodeMaxDepth(node: Node, depth: number): number {
   return max;
 }
 
-export function parseChainPerLine(command: string): PerLineResult {
+export function parseCommandPerLine(command: string): PerLineResult {
   const rawLines = command.split("\n");
   const lines: LineSegmentInfo[] = [];
   for (let i = 0; i < rawLines.length; i++) {
     const line = rawLines[i];
     if (line.trim().length === 0) continue;
-    lines.push({ lineNumber: i + 1, segmentCount: parseChain(line).segments.length });
+    lines.push({ lineNumber: i + 1, segmentCount: parseCommand(line).invocations.length });
   }
   let worstLine: LineSegmentInfo | null = null;
   for (const info of lines) {
@@ -295,22 +311,22 @@ export function countScriptStatements(script: string): number {
 
 const HEREDOC_INTERPRETERS = new Set(["python", "python3", "perl", "ruby", "php", "node", "sh", "bash", "zsh", "ksh"]);
 
-export function detectInlineScript(segment: ChainSegment): InlineScriptInfo | null {
+export function detectInlineScript(invocation: NormalizedInvocation): InlineScriptInfo | null {
   for (const { pattern, interpreter } of INLINE_SCRIPT_PATTERNS) {
-    const match = segment.command.match(pattern);
+    const match = invocation.command.match(pattern);
     if (match) {
-      const rest = segment.command.slice(match[0].length);
+      const rest = invocation.command.slice(match[0].length);
       const script = stripQuotedScript(rest) ?? rest.trim();
       if (script.length === 0) return null;
       return { interpreter, statementCount: countScriptStatements(script) };
     }
   }
 
-  if (HEREDOC_INTERPRETERS.has(segment.commandName)) {
-    const heredoc = segment.redirects.find((r) => r.operator === "<<" || r.operator === "<<-");
+  if (HEREDOC_INTERPRETERS.has(invocation.commandName)) {
+    const heredoc = invocation.redirects.find((r) => r.operator === "<<" || r.operator === "<<-");
     if (heredoc && heredoc.target.trim().length > 0) {
       return {
-        interpreter: `${segment.commandName} (heredoc)`,
+        interpreter: `${invocation.commandName} (heredoc)`,
         statementCount: countScriptStatements(heredoc.target),
       };
     }
@@ -319,9 +335,9 @@ export function detectInlineScript(segment: ChainSegment): InlineScriptInfo | nu
   return null;
 }
 
-export function parseChain(command: string): ChainResult {
+export function parseCommand(command: string): ParsedCommand {
   if (!command || command.trim().length === 0) {
-    return { segments: [], topLevelSegments: [], parseError: false, errors: [], maxDepth: 0 };
+    return { invocations: [], topLevelInvocations: [], parseError: false, errors: [], maxDepth: 0 };
   }
 
   const result = parse(command);
@@ -335,14 +351,14 @@ export function parseChain(command: string): ChainResult {
     }
   }
 
-  const topLevelSegments = extractCommandsFromScript(result);
-  const segments = [...topLevelSegments];
+  const topLevelInvocations = extractInvocationsFromScript(result);
+  const invocations = [...topLevelInvocations];
 
-  const nestedCmds = extractNestedCommands(result);
-  segments.push(...nestedCmds);
+  const nestedCmds = extractNestedInvocations(result);
+  invocations.push(...nestedCmds);
 
-  for (const seg of segments) {
-    const metaArgs = parseMetaCommandArgs(seg.command);
+  for (const inv of invocations) {
+    const metaArgs = parseMetaCommandArgs(inv.command);
     if (metaArgs) {
       const metaResult = parse(metaArgs);
       if (metaResult.errors && metaResult.errors.length > 0) {
@@ -351,14 +367,14 @@ export function parseChain(command: string): ChainResult {
           errors.push(err.message);
         }
       }
-      const metaSegments = extractCommandsFromScript(metaResult);
-      for (const ms of metaSegments) {
-        segments.push(ms);
+      const metaInvocations = extractInvocationsFromScript(metaResult);
+      for (const ms of metaInvocations) {
+        invocations.push(ms);
       }
     }
   }
 
   const maxDepth = computeScriptMaxDepth(result, 1);
 
-  return { segments, topLevelSegments, parseError, errors, maxDepth };
+  return { invocations, topLevelInvocations, parseError, errors, maxDepth };
 }
