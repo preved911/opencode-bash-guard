@@ -2,7 +2,7 @@ import type { Config, Hooks } from "@opencode-ai/plugin";
 import type { Permission } from "@opencode-ai/sdk";
 import { parseConfig } from "./config.js";
 import type { PluginConfig } from "./config.js";
-import { beforeExecute, handlePermissionAsk } from "./enforce.js";
+import { beforeExecute, handlePermissionAsk, clearStoredDecision } from "./enforce.js";
 import { loadPluginConfig } from "./plugin-config.js";
 import type { PluginFileConfig } from "./plugin-config.js";
 
@@ -16,6 +16,13 @@ import type { PluginFileConfig } from "./plugin-config.js";
  *
  * Observable invariant: permission prompt count and trigger points per
  * invocation and callID are identical to the pre-refactor implementation.
+ *
+ * Decision cleanup: `permission.ask` consumes the stored decision (single-use).
+ * `tool.execute.after` garbage-collects any decision that was never consumed —
+ * covering terminal paths where the ask hook does not fire. Decisions for tool
+ * calls that never reach execution (cancelled before the permission gate) have
+ * no callID-bearing cleanup hook in the SDK; a reused callID overwrites the
+ * stale entry, so staleness cannot leak into a later decision.
  */
 
 export interface AdapterState {
@@ -72,6 +79,11 @@ export function createBashGuardHooks(input: { directory: string }): Hooks {
     "permission.ask": async (permInput: Permission, permOutput) => {
       if (!state.nativeConfig?.enabled) return;
       handlePermissionAsk(permInput, permOutput);
+    },
+
+    "tool.execute.after": async (toolInput) => {
+      if (!state.nativeConfig?.enabled) return;
+      clearStoredDecision(toolInput.callID);
     },
   };
 

