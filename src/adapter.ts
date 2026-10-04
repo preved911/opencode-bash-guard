@@ -2,7 +2,7 @@ import type { Config, Hooks } from "@opencode-ai/plugin";
 import type { Permission } from "@opencode-ai/sdk";
 import { parseConfig } from "./config.js";
 import type { PluginConfig } from "./config.js";
-import { beforeExecute, handlePermissionAsk, clearStoredDecision } from "./enforce.js";
+import { beforeExecute, handlePermissionAsk, clearStoredDecision, clearSessionDecisions } from "./enforce.js";
 import { loadPluginConfig } from "./plugin-config.js";
 import type { PluginFileConfig } from "./plugin-config.js";
 
@@ -53,12 +53,13 @@ export function createBashGuardHooks(input: { directory: string }): Hooks {
     },
 
     "tool.execute.before": async (toolInput, toolOutput) => {
-      clearStoredDecision(toolInput.callID);
+      clearStoredDecision(toolInput.sessionID, toolInput.callID);
       if (!state.nativeConfig?.enabled) return;
 
       const result = beforeExecute(
         toolInput.tool,
         toolInput.callID,
+        toolInput.sessionID,
         input.directory,
         toolOutput.args,
         state.nativeConfig,
@@ -87,7 +88,15 @@ export function createBashGuardHooks(input: { directory: string }): Hooks {
     },
 
     "tool.execute.after": async (toolInput) => {
-      clearStoredDecision(toolInput.callID);
+      clearStoredDecision(toolInput.sessionID, toolInput.callID);
+    },
+
+    event: async ({ event }) => {
+      if (event.type === "session.idle") {
+        clearSessionDecisions(event.properties.sessionID);
+      } else if (event.type === "session.deleted") {
+        clearSessionDecisions(event.properties.info.id);
+      }
     },
   };
 

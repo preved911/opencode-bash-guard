@@ -130,37 +130,37 @@ describe("resolveChain", () => {
 
 describe("beforeExecute", () => {
   beforeEach(() => {
-    clearStoredDecision("test-call-1");
+    clearStoredDecision("s1", "test-call-1");
   });
 
   it("ignores non-Bash tools", () => {
-    const result = beforeExecute("Edit", "test-call-1", "/", {}, defaultConfig);
+    const result = beforeExecute("Edit", "test-call-1", "s1", "/", {}, defaultConfig);
     expect(result.shouldWrap).toBe(false);
   });
 
   it("handles lowercase bash tool name", () => {
-    const result = beforeExecute("bash", "test-call-1", "/", { command: "git status && sudo rm" }, defaultConfig);
+    const result = beforeExecute("bash", "test-call-1", "s1", "/", { command: "git status && sudo rm" }, defaultConfig);
     expect(result.chainAction).toBe("deny");
   });
 
   it("handles capitalized Bash tool name", () => {
-    const result = beforeExecute("Bash", "test-call-1", "/", { command: "git status && sudo rm" }, defaultConfig);
+    const result = beforeExecute("Bash", "test-call-1", "s1", "/", { command: "git status && sudo rm" }, defaultConfig);
     expect(result.chainAction).toBe("deny");
   });
 
   it("wraps and stores deny for parse errors", () => {
-    const result = beforeExecute("Bash", "test-call-1", "/", { command: "echo \"hello" }, defaultConfig);
+    const result = beforeExecute("Bash", "test-call-1", "s1", "/", { command: "echo \"hello" }, defaultConfig);
     expect(result.chainAction).toBe("deny");
   });
 
   it("returns no action for empty command", () => {
-    const result = beforeExecute("Bash", "test-call-1", "/", { command: "" }, defaultConfig);
+    const result = beforeExecute("Bash", "test-call-1", "s1", "/", { command: "" }, defaultConfig);
     expect(result.shouldWrap).toBe(false);
     expect(result.chainAction).toBeNull();
   });
 
   it("wraps and stores deny for denied chains", () => {
-    const result = beforeExecute("Bash", "test-call-1", "/", { command: "sudo rm -rf /" }, defaultConfig);
+    const result = beforeExecute("Bash", "test-call-1", "s1", "/", { command: "sudo rm -rf /" }, defaultConfig);
     expect(result.shouldWrap).toBe(true);
     expect(result.chainAction).toBe("deny");
   });
@@ -168,9 +168,9 @@ describe("beforeExecute", () => {
 
 describe("handlePermissionAsk", () => {
   it("sets status to deny for stored deny decisions", () => {
-    beforeExecute("Bash", "deny-call", "/", { command: "sudo rm -rf /" }, defaultConfig);
+    beforeExecute("Bash", "deny-call", "s1", "/", { command: "sudo rm -rf /" }, defaultConfig);
     const output = { status: "ask" as const };
-    handlePermissionAsk({ callID: "deny-call" }, output);
+    handlePermissionAsk({ sessionID: "s1", callID: "deny-call" }, output);
     expect(output.status).toBe("deny");
   });
 
@@ -183,15 +183,15 @@ describe("handlePermissionAsk", () => {
             toolPermissions: [],
       enabled: true,
     };
-    beforeExecute("Bash", "ask-call", "/", { command: "some-unknown-cmd" }, config);
+    beforeExecute("Bash", "ask-call", "s1", "/", { command: "some-unknown-cmd" }, config);
     const output = { status: "ask" as const };
-    handlePermissionAsk({ callID: "ask-call" }, output);
+    handlePermissionAsk({ sessionID: "s1", callID: "ask-call" }, output);
     expect(output.status).toBe("ask");
   });
 
   it("does nothing when no decision stored", () => {
     const output = { status: "ask" as const };
-    handlePermissionAsk({ callID: "nonexistent" }, output);
+    handlePermissionAsk({ sessionID: "s1", callID: "nonexistent" }, output);
     expect(output.status).toBe("ask");
   });
 });
@@ -314,12 +314,12 @@ describe("restructure enforcement in beforeExecute", () => {
   const disabled: RestructureConfig = { enabled: false, maxSegments: 3, maxDepth: 2 };
 
   beforeEach(() => {
-    clearStoredDecision("restructure-test");
+    clearStoredDecision("s1", "restructure-test");
   });
 
   it("allowed complex chain passes — allowed stays allowed", () => {
     const cmd = "git status && git log && git diff && git show";
-    const result = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, gitAllowConfig, enabled);
+    const result = beforeExecute("Bash", "restructure-test", "s1", "/project", { command: cmd }, gitAllowConfig, enabled);
     expect(result.chainAction).toBe("allow");
     expect(result.rejectionMessage).toBeNull();
     expect(result.shouldWrap).toBe(false);
@@ -327,7 +327,7 @@ describe("restructure enforcement in beforeExecute", () => {
 
   it("complex ask chain rejected with counts and instruction", () => {
     const cmd = "git status && rm -rf /tmp/x && echo ok && ls";
-    const result = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, gitAllowConfig, enabled);
+    const result = beforeExecute("Bash", "restructure-test", "s1", "/project", { command: cmd }, gitAllowConfig, enabled);
     expect(result.rejectionMessage).not.toBeNull();
     expect(result.rejectionMessage).toContain("4");
     expect(result.rejectionMessage).toContain("Re-issue as separate bash tool calls");
@@ -336,15 +336,15 @@ describe("restructure enforcement in beforeExecute", () => {
 
   it("rejected ask chain does not store a decision (no dialog follows the throw)", () => {
     const cmd = "git status && rm -rf /tmp/x && echo ok && ls";
-    beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, gitAllowConfig, enabled);
+    beforeExecute("Bash", "restructure-test", "s1", "/project", { command: cmd }, gitAllowConfig, enabled);
     const output = { status: "ask" as const };
-    handlePermissionAsk({ callID: "restructure-test" }, output);
+    handlePermissionAsk({ sessionID: "s1", callID: "restructure-test" }, output);
     expect(output.status).toBe("ask");
   });
 
   it("multi-line one-command-per-line re-issue passes the complexity gate", () => {
     const cmd = "git status\nrm -rf /tmp/x\necho ok\nls";
-    const result = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, askConfig, enabled);
+    const result = beforeExecute("Bash", "restructure-test", "s1", "/project", { command: cmd }, askConfig, enabled);
     expect(result.rejectionMessage).toBeNull();
     expect(result.chainAction).toBe("ask");
     expect(result.shouldWrap).toBe(true);
@@ -352,21 +352,21 @@ describe("restructure enforcement in beforeExecute", () => {
 
   it("2-line script of 5-segment chains rejected naming the line", () => {
     const cmd = "git a1 && git a2 && git a3 && git a4 && rm -rf /tmp/x\ngit b1 && git b2 && git b3 && git b4 && rm -rf /tmp/y";
-    const result = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, askConfig, enabled);
+    const result = beforeExecute("Bash", "restructure-test", "s1", "/project", { command: cmd }, askConfig, enabled);
     expect(result.rejectionMessage).not.toBeNull();
     expect(result.rejectionMessage).toContain("line 1: 5 chained commands");
   });
 
   it("inline python3 -c with 5 statements throws", () => {
     const cmd = `git status && python3 -c "import os; os.system('a'); os.system('b'); os.system('c'); os.system('d')"`;
-    const result = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, gitAllowConfig, enabled);
+    const result = beforeExecute("Bash", "restructure-test", "s1", "/project", { command: cmd }, gitAllowConfig, enabled);
     expect(result.rejectionMessage).not.toBeNull();
     expect(result.rejectionMessage).toContain("Complex inline script rejected");
   });
 
   it("pretty inline script passes the gate and follows the plain ask flow", () => {
     const cmd = 'git status && python3 -c "import os\nos.system(\'a\')\nos.system(\'b\')"';
-    const result = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, gitAllowConfig, enabled);
+    const result = beforeExecute("Bash", "restructure-test", "s1", "/project", { command: cmd }, gitAllowConfig, enabled);
     expect(result.rejectionMessage).toBeNull();
     expect(result.chainAction).toBe("ask");
     expect(result.shouldWrap).toBe(true);
@@ -374,7 +374,7 @@ describe("restructure enforcement in beforeExecute", () => {
 
   it("feature disabled — complex ask chain follows the plain ask flow", () => {
     const cmd = "git status && rm -rf /tmp/x && echo ok && ls";
-    const result = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, gitAllowConfig, disabled);
+    const result = beforeExecute("Bash", "restructure-test", "s1", "/project", { command: cmd }, gitAllowConfig, disabled);
     expect(result.rejectionMessage).toBeNull();
     expect(result.chainAction).toBe("ask");
     expect(result.shouldWrap).toBe(true);
@@ -394,7 +394,7 @@ describe("restructure enforcement in beforeExecute", () => {
       enabled: true,
     };
     const cmd = "git push --force && git status && git log && git show";
-    const result = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, denyPushConfig, enabled);
+    const result = beforeExecute("Bash", "restructure-test", "s1", "/project", { command: cmd }, denyPushConfig, enabled);
     expect(result.rejectionMessage).toBeNull();
     expect(result.chainAction).toBe("deny");
     expect(result.shouldWrap).toBe(true);
@@ -410,7 +410,7 @@ describe("restructure enforcement in beforeExecute", () => {
       enabled: true,
     };
     const cmd = "a && b && c && d";
-    const result = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, noRules, enabled);
+    const result = beforeExecute("Bash", "restructure-test", "s1", "/project", { command: cmd }, noRules, enabled);
     expect(result.rejectionMessage).toBeNull();
     expect(result.chainAction).toBeNull();
     expect(result.shouldWrap).toBe(false);
@@ -418,15 +418,15 @@ describe("restructure enforcement in beforeExecute", () => {
 
   it("parse error unchanged — fail-closed deny", () => {
     const cmd = 'echo "unbalanced';
-    const result = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, askConfig, enabled);
+    const result = beforeExecute("Bash", "restructure-test", "s1", "/project", { command: cmd }, askConfig, enabled);
     expect(result.rejectionMessage).toBeNull();
     expect(result.chainAction).toBe("deny");
   });
 
   it("repeated violation re-throws with the same message (no counter)", () => {
     const cmd = "git status && rm -rf /tmp/x && echo ok && ls";
-    const first = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, gitAllowConfig, enabled);
-    const second = beforeExecute("Bash", "restructure-test", "/project", { command: cmd }, gitAllowConfig, enabled);
+    const first = beforeExecute("Bash", "restructure-test", "s1", "/project", { command: cmd }, gitAllowConfig, enabled);
+    const second = beforeExecute("Bash", "restructure-test", "s1", "/project", { command: cmd }, gitAllowConfig, enabled);
     expect(second.rejectionMessage).toBe(first.rejectionMessage);
     expect(second.rejectionMessage).not.toBeNull();
   });
@@ -551,12 +551,37 @@ describe("decision store bounds", () => {
     enabled: true,
   };
 
-  it("store is size-bounded: oldest unconsumed decisions are evicted", () => {
+  it("store is size-bounded: oldest allow handoffs are evicted", () => {
+    const curlAllowConfig: PluginConfig = {
+      ...askConfig,
+      toolPermissions: [{ tool: "curl", args: [{ token: "-X", pattern: "GET", action: "allow" }], flags: { "-X": 1 } }],
+    };
     for (let i = 0; i < 300; i++) {
-      beforeExecute("Bash", `evict-${i}`, "/project", { command: "wget evil.sh" }, askConfig);
+      beforeExecute("Bash", `evict-${i}`, "s1", "/project", { command: "curl -X GET https://x.com" }, curlAllowConfig);
     }
-    expect(getStoredDecision("evict-0")).toBeUndefined();
-    expect(getStoredDecision("evict-299")?.action).toBe("ask");
-    for (let i = 0; i < 300; i++) clearStoredDecision(`evict-${i}`);
+    expect(getStoredDecision("s1", "evict-0")).toBeUndefined();
+    expect(getStoredDecision("s1", "evict-299")?.action).toBe("allow");
+    for (let i = 0; i < 300; i++) clearStoredDecision("s1", `evict-${i}`);
+  });
+
+  it("never evicts an unresolved deny; deny overflow fails closed", () => {
+    const denyConfig: PluginConfig = {
+      ...askConfig,
+      bashRules: [
+        { pattern: "*", action: "ask" },
+        { pattern: "sudo *", action: "deny" },
+      ],
+    };
+    for (let i = 0; i < 256; i++) {
+      beforeExecute("Bash", `deny-${i}`, "sat-session", "/project", { command: "sudo rm -rf /" }, denyConfig);
+    }
+    expect(getStoredDecision("sat-session", "deny-0")?.action).toBe("deny");
+
+    const overflow = beforeExecute("Bash", "deny-overflow", "sat-session", "/project", { command: "sudo rm -rf /" }, denyConfig);
+    expect(overflow.rejectionMessage).not.toBeNull();
+    expect(getStoredDecision("sat-session", "deny-overflow")).toBeUndefined();
+    expect(getStoredDecision("sat-session", "deny-0")?.action).toBe("deny");
+
+    for (let i = 0; i < 256; i++) clearStoredDecision("sat-session", `deny-${i}`);
   });
 });
