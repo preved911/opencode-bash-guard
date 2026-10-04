@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { beforeExecute, handlePermissionAsk, clearStoredDecision } from "../enforce.js";
+import { beforeExecute, handlePermissionAsk, clearStoredDecision, getStoredDecision } from "../enforce.js";
 import { resolveSegment, resolveChain } from "../policy.js";
 import { checkComplexity, buildRejectionMessage } from "../readability.js";
 import type { PluginConfig } from "../config.js";
@@ -538,5 +538,25 @@ describe("redirect enforcement", () => {
       { operator: ">", target: "out.txt", fileDescriptor: undefined, wellKnown: false },
     ]), cwd, config);
     expect(action).toBe("deny");
+  });
+});
+
+describe("decision store bounds", () => {
+  const askConfig: PluginConfig = {
+    bashRules: [{ pattern: "*", action: "ask" }],
+    editRules: [],
+    externalDirectoryRules: [],
+    externalDirectoryDefault: null,
+    toolPermissions: [],
+    enabled: true,
+  };
+
+  it("store is size-bounded: oldest unconsumed decisions are evicted", () => {
+    for (let i = 0; i < 300; i++) {
+      beforeExecute("Bash", `evict-${i}`, "/project", { command: "wget evil.sh" }, askConfig);
+    }
+    expect(getStoredDecision("evict-0")).toBeUndefined();
+    expect(getStoredDecision("evict-299")?.action).toBe("ask");
+    for (let i = 0; i < 300; i++) clearStoredDecision(`evict-${i}`);
   });
 });

@@ -17,12 +17,16 @@ import type { PluginFileConfig } from "./plugin-config.js";
  * Observable invariant: permission prompt count and trigger points per
  * invocation and callID are identical to the pre-refactor implementation.
  *
- * Decision cleanup: `permission.ask` consumes the stored decision (single-use).
- * `tool.execute.after` garbage-collects any decision that was never consumed —
- * covering terminal paths where the ask hook does not fire. Decisions for tool
- * calls that never reach execution (cancelled before the permission gate) have
- * no callID-bearing cleanup hook in the SDK; a reused callID overwrites the
- * stale entry, so staleness cannot leak into a later decision.
+ * Decision cleanup, enforced at every lifecycle point the SDK exposes:
+ * `permission.ask` consumes the decision (single-use), `tool.execute.after`
+ * garbage-collects any decision the ask hook never consumed, and every
+ * `tool.execute.before` first invalidates any decision left by a previous use
+ * of the same callID — including reuse on non-storing paths (non-bash, empty,
+ * allow, no-opinion), where nothing would otherwise remove the stale entry.
+ * The store is size-bounded, so decisions for calls cancelled before the
+ * permission gate — for which the SDK exposes no callID-bearing cleanup hook —
+ * are evicted rather than accumulating. Immediate cleanup on pre-execution
+ * cancellation is not guaranteed by the SDK.
  */
 
 export interface AdapterState {
@@ -49,6 +53,7 @@ export function createBashGuardHooks(input: { directory: string }): Hooks {
     },
 
     "tool.execute.before": async (toolInput, toolOutput) => {
+      clearStoredDecision(toolInput.callID);
       if (!state.nativeConfig?.enabled) return;
 
       const result = beforeExecute(
@@ -82,7 +87,6 @@ export function createBashGuardHooks(input: { directory: string }): Hooks {
     },
 
     "tool.execute.after": async (toolInput) => {
-      if (!state.nativeConfig?.enabled) return;
       clearStoredDecision(toolInput.callID);
     },
   };

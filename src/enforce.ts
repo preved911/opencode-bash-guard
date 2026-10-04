@@ -20,6 +20,23 @@ export interface StoredDecision {
 
 const decisionStore = new Map<string, StoredDecision>();
 
+/**
+ * Bound on unconsumed decisions. Decisions for calls cancelled before the
+ * permission gate have no callID-bearing cleanup hook in the SDK; the cap
+ * bounds their residual memory instead of letting the store grow unbounded.
+ */
+const MAX_STORED_DECISIONS = 256;
+
+function storeDecision(callID: string, decision: StoredDecision): void {
+  decisionStore.delete(callID);
+  decisionStore.set(callID, decision);
+  while (decisionStore.size > MAX_STORED_DECISIONS) {
+    const oldest = decisionStore.keys().next().value;
+    if (oldest === undefined) break;
+    decisionStore.delete(oldest);
+  }
+}
+
 export function getStoredDecision(callID: string): StoredDecision | undefined {
   return decisionStore.get(callID);
 }
@@ -57,14 +74,14 @@ export function beforeExecute(
 
   const chain = parseCommand(command);
   if (chain.parseError || chain.invocations.length === 0) {
-    decisionStore.set(callID, { action: "deny" });
+    storeDecision(callID, { action: "deny" });
     return { shouldWrap: true, chainAction: "deny", rejectionMessage: null };
   }
 
   // Degraded mode (broken plugin config): args rules are gone and glob allows are suspended —
   // everything asks, so a config typo can never silently re-allow a restricted command.
   if (degraded) {
-    decisionStore.set(callID, { action: "ask" });
+    storeDecision(callID, { action: "ask" });
     return { shouldWrap: true, chainAction: "ask", rejectionMessage: null };
   }
 
@@ -72,7 +89,7 @@ export function beforeExecute(
 
   if (action === null || action === "allow") {
     if (action === "allow" && allowFromArgsRule) {
-      decisionStore.set(callID, { action: "allow" });
+      storeDecision(callID, { action: "allow" });
     }
     return { shouldWrap: false, chainAction: action, rejectionMessage: null };
   }
@@ -89,7 +106,7 @@ export function beforeExecute(
   }
 
   if (action === "deny" || action === "ask") {
-    decisionStore.set(callID, { action });
+    storeDecision(callID, { action });
     return { shouldWrap: true, chainAction: action, rejectionMessage: null };
   }
 

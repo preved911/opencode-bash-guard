@@ -222,6 +222,24 @@ describe("characterization: prompt cardinality per path", () => {
     await hooks["tool.execute.before"]!({ tool: "Bash", callID: "lifecycle-6", sessionID: "s" }, { args: { command: "sudo rm -rf /" } });
     expect(getStoredDecision("lifecycle-6")?.action).toBe("deny");
   });
+
+  it("stale decision does not survive a reused callID on a non-storing path", async () => {
+    const hooks = createBashGuardHooks({ directory: "/project" });
+    await hooks.config!({ permission: { bash: { "*": "ask", "sudo *": "deny" } } } as any);
+
+    await hooks["tool.execute.before"]!({ tool: "Bash", callID: "reuse-stale", sessionID: "s" }, { args: { command: "sudo rm -rf /" } });
+    expect(getStoredDecision("reuse-stale")?.action).toBe("deny");
+
+    await hooks["tool.execute.before"]!({ tool: "Bash", callID: "reuse-stale", sessionID: "s" }, { args: { command: "" } });
+    expect(getStoredDecision("reuse-stale")).toBeUndefined();
+
+    await hooks["tool.execute.before"]!({ tool: "Edit", callID: "reuse-stale", sessionID: "s" }, { args: {} });
+    expect(getStoredDecision("reuse-stale")).toBeUndefined();
+
+    const output = { status: "ask" as const };
+    await hooks["permission.ask"]!({ callID: "reuse-stale" } as any, output);
+    expect(output.status).toBe("ask");
+  });
 });
 
 describe("characterization: command wrapping", () => {
