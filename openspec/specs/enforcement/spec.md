@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Resolve each segment and the whole chain to a single action with most-restrictive-wins semantics (deny > ask > no action), and enforce decisions through `tool.execute.before` plus `permission.asked` event replies.
+Resolve each segment and the whole chain to a single action with most-restrictive-wins semantics (deny > ask > no action), and enforce decisions through the `tool.execute.before` / `permission.ask` dual-hook mechanism.
 
 ## Requirements
 
@@ -50,23 +50,23 @@ The system SHALL aggregate all segment actions. If ALL segments resolve to `allo
 - **WHEN** `unbash` returns a parse error for any part of the command
 - **THEN** the chain action is `deny` (fail closed)
 
-### Requirement: Enforcement via hook and permission event
+### Requirement: Enforcement via dual-hook
 
-`tool.execute.before` SHALL wrap chains with a non-`no action` result in `{ ... ; }`. It SHALL store only decisions that change the native permission outcome. `permission.asked` SHALL consume a stored decision by sessionID and nested tool callID, then reply through the SDK with `once` for allow or `reject` for deny. Exception: complex ask-resolving chains are rejected with readability guidance instead of being wrapped for the dialog (see the readability requirement).
+`tool.execute.before` SHALL wrap chains with non-`no action` result in `{ ... ; }` and store the decision. `permission.ask` SHALL apply stored decisions. Exception: complex ask-resolving chains are rejected with readability guidance instead of being wrapped for the dialog (see the readability requirement).
 
 #### Scenario: No action — let through
 - **WHEN** chain action is `no action`
 - **THEN** `tool.execute.before` SHALL NOT modify the command
 
-#### Scenario: Ask — wrap and leave the native prompt unchanged
+#### Scenario: Ask — wrap and let permission.ask handle
 - **WHEN** chain action is `ask`
-- **THEN** `tool.execute.before` SHALL wrap command in `{ ... ; }` and SHALL NOT store an override
-- **AND** `permission.asked` SHALL send no reply, leaving native `ask` unchanged
+- **THEN** `tool.execute.before` wraps command in `{ ... ; }` and stores `"ask"`
+- **AND** `permission.ask` does nothing — user sees native opencode dialog
 
 #### Scenario: Deny — wrap and block
 - **WHEN** chain action is `deny`
-- **THEN** `tool.execute.before` SHALL wrap command in `{ ... ; }` and SHALL store `"deny"`
-- **AND** `permission.asked` SHALL reply `reject` through the SDK — blocked
+- **THEN** `tool.execute.before` wraps command in `{ ... ; }` and stores `"deny"`
+- **AND** `permission.ask` sets `output.status = "deny"` — blocked
 
 #### Scenario: Wrapped chain breaks allow patterns
 - **WHEN** original command is `git status && rm -rf /` and action is `ask`
@@ -75,16 +75,16 @@ The system SHALL aggregate all segment actions. If ALL segments resolve to `allo
 
 ### Requirement: Reject complex ask-resolving chains with readability guidance
 
-When the resolved chain action is `ask` and the command contains more than one top-level segment (chained via `&&`, `||`, `;`, `|`, or newlines), the system SHALL reject the command before execution instead of showing the permission dialog: `tool.execute.before` SHALL throw an error containing rewrite guidance (re-issue as separate steps, one command per line, with comments) and the original command text. It SHALL NOT wrap or replace the command, and SHALL NOT store a permission override. Single-segment commands that resolve to `ask` SHALL keep the wrap-and-dialog behavior. Allowed chains, no-opinion chains, and parse errors (which deny outright) SHALL NOT trigger the readability reject.
+When the resolved chain action is `ask` and the command contains more than one top-level segment (chained via `&&`, `||`, `;`, `|`, or newlines), the system SHALL reject the command instead of showing the permission dialog: it SHALL store a `deny` decision and replace the executed command with a self-contained script that prints a rejection notice with rewrite guidance (re-issue as separate steps, one command per line, with comments), echoes the original command text, and exits non-zero. Single-segment commands that resolve to `ask` SHALL keep the wrap-and-dialog behavior. Allowed chains, no-opinion chains, and parse errors (which deny outright) SHALL NOT trigger the readability reject.
 
 #### Scenario: Complex ask chain is rejected
 - **WHEN** the command is `echo hi && echo there` under `"*": "ask"`
-- **THEN** `tool.execute.before` throws a readability error containing rewrite guidance and the original command
-- **AND** no permission override is stored
+- **THEN** the result is a readability reject with a stored `deny` decision
+- **AND** `permission.ask` resolves the call to `deny` — blocked
 
 #### Scenario: Mixed chain where one segment needs ask is rejected
 - **WHEN** the command is `npm install good && wget evil.sh` where `npm` falls back to `"*": "ask"`
-- **THEN** the chain resolves to `ask` and `tool.execute.before` throws a readability error without storing a permission override
+- **THEN** the chain resolves to `ask` and is readability-rejected with a stored `deny` decision
 
 #### Scenario: Single ask command keeps the dialog
 - **WHEN** the command is `wget evil.sh` (single segment resolving to `ask`)
@@ -94,9 +94,9 @@ When the resolved chain action is `ask` and the command contains more than one t
 - **WHEN** chain is `git status && git log` with both segments allowed
 - **THEN** no wrap and no readability reject
 
-#### Scenario: Readability error blocks execution
+#### Scenario: Replacement command self-rejects
 - **WHEN** a readability reject fires
-- **THEN** execution stops before the command runs, and the thrown error contains the rejection notice, rewrite guidance, and original command
+- **THEN** the executed command prints the rejection notice and rewrite guidance, echoes the original command, and exits with a non-zero status
 
 ### Requirement: Handle edge cases
 
