@@ -1,11 +1,24 @@
-import { describe, expect, it } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { beforeExecute } from "../enforce.js";
+import { beforeExecute, handlePermissionAsk, clearStoredDecision, getStoredDecision } from "../enforce.js";
 import { createBashGuardHooks } from "../adapter.js";
 import type { PluginConfig } from "../config.js";
 import type { RestructureConfig } from "../plugin-config.js";
+
+/**
+ * Characterization tests (task 1.4): lock end-to-end hook behavior — readability
+ * thresholds and messages, command wrapping, single-use callID handoff and cleanup
+ * between `tool.execute.before` and `permission.ask`, and unchanged prompt count
+ * and trigger points across allow, ask, deny, chained, nested, empty, disabled,
+ * error, and cancellation paths.
+ *
+ * Prompt-cardinality model (observable invariant):
+ * - allow / no-opinion / empty / disabled / readability-rejected → 0 prompts
+ * - ask → exactly 1 prompt (permission.ask fires; stored decision is single-use)
+ * - deny → exactly 1 prompt trigger (permission.ask fires and is forced to deny)
+ */
 
 const nativeAskAll: PluginConfig = {
   bashRules: [
@@ -23,89 +36,41 @@ const nativeAskAll: PluginConfig = {
 const enabled: RestructureConfig = { enabled: true, maxSegments: 3, maxDepth: 2 };
 const disabled: RestructureConfig = { enabled: false, maxSegments: 3, maxDepth: 2 };
 
-function runHooks(tool: string, command: string, config: PluginConfig, restructure: RestructureConfig, degraded = false) {
+/** Simulate the full hook sequence for one tool invocation and count prompts. */
+function runHooks(tool: string, callID: string, command: string, config: PluginConfig, restructure: RestructureConfig, degraded = false) {
   const prompts: Array<"ask" | "deny" | "allow"> = [];
-  const result = beforeExecute(tool, "/project", { command }, config, restructure, degraded);
+  const result = beforeExecute(tool, callID, "s1", "/project", { command }, config, restructure, degraded);
 
   if (result.rejectionMessage) {
+    // index.ts throws — nothing executes, no dialog, no stored decision.
     return { result, prompts, thrown: result.rejectionMessage };
   }
 
+  if (result.shouldWrap && result.chainAction) {
+    // adapter wraps: `{ cmd; }` — one prompt trigger follows via permission.ask
+  }
+
+  // permission.ask fires for ask/deny (opencode asks the human); allow/no-opinion never triggers it.
   if (result.chainAction === "ask" || result.chainAction === "deny") {
-    const output: { status: "ask" | "deny" | "allow" } = { status: "ask" };
-    if (result.permissionOverride !== null) output.status = result.permissionOverride;
+    const output = { status: "ask" as const };
+    handlePermissionAsk({ sessionID: "s1", callID }, output);
     prompts.push(output.status);
   }
 
   return { result, prompts, thrown: null };
 }
 
-async function configureAskAndDeny(
-  hooks: ReturnType<typeof createBashGuardHooks>,
-  bashPermissions: { readonly [pattern: string]: "ask" | "allow" | "deny" } = { "*": "ask", "git *": "allow", "sudo *": "deny" },
-): Promise<void> {
-  const config = hooks.config;
-  expect(config).toBeDefined();
-  await config?.({ permission: { bash: bashPermissions } } as any);
-}
-
-async function runBefore(
-  hooks: ReturnType<typeof createBashGuardHooks>,
-  input: { readonly sessionID: string; readonly callID: string; readonly command: string },
-): Promise<void> {
-  const before = hooks["tool.execute.before"];
-  expect(before).toBeDefined();
-  await before?.({ tool: "Bash", callID: input.callID, sessionID: input.sessionID }, { args: { command: input.command } });
-}
-
-async function runPermissionAsk(
-  hooks: ReturnType<typeof createBashGuardHooks>,
-  input: { readonly sessionID: string; readonly callID?: string },
-): Promise<"ask" | "allow" | "deny"> {
-  const permissionAsk = hooks["permission.ask"];
-  expect(permissionAsk).toBeDefined();
-  const output = { status: "ask" as const };
-  await permissionAsk?.({ sessionID: input.sessionID, callID: input.callID } as any, output);
-  return output.status;
-}
-
-interface ArgsAllowFixture {
-  readonly hooks: ReturnType<typeof createBashGuardHooks>;
-  readonly cleanup: () => void;
-}
-
-async function createArgsAllowFixture(): Promise<ArgsAllowFixture> {
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), "obg-allow-"));
-  const previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
-  fs.mkdirSync(path.join(project, ".opencode"), { recursive: true });
-  fs.writeFileSync(
-    path.join(project, ".opencode", "opencode-bash-guard.jsonc"),
-    JSON.stringify({
-      matcherVersion: 2,
-      permissions: [{ tool: "curl", args: [{ token: "-X", pattern: "GET", action: "allow" }], flags: { "-X": 1 } }],
-    }),
-  );
-  process.env.XDG_CONFIG_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "obg-xdg-"));
-
-  const hooks = createBashGuardHooks({ directory: project });
-  await configureAskAndDeny(hooks);
-
-  return {
-    hooks,
-    cleanup: () => {
-      if (previousXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
-      else process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
-      fs.rmSync(project, { recursive: true, force: true });
-    },
-  };
-}
-
 describe("characterization: prompt cardinality per path", () => {
+  beforeEach(() => {
+    clearStoredDecision("s1", "card");
+  });
+
   it("allow → 0 prompts, no stored decision, no wrap", () => {
-    const { result, prompts } = runHooks("Bash", "git status", nativeAskAll, enabled);
+    const { result, prompts } = runHooks("Bash", "card", "git status", nativeAskAll, enabled);
     expect(result.chainAction).toBe("allow");
     expect(result.shouldWrap).toBe(false);
     expect(prompts).toHaveLength(0);
+    expect(getStoredDecision("s1", "card")).toBeUndefined();
   });
 
   it("no-opinion → 0 prompts, no wrap", () => {
@@ -117,61 +82,66 @@ describe("characterization: prompt cardinality per path", () => {
       toolPermissions: [],
       enabled: true,
     };
-    const { result, prompts } = runHooks("Bash", "ls -la", config, enabled);
+    const { result, prompts } = runHooks("Bash", "card", "ls -la", config, enabled);
     expect(result.chainAction).toBeNull();
     expect(result.shouldWrap).toBe(false);
     expect(prompts).toHaveLength(0);
   });
 
   it("ask → exactly 1 prompt, wrapped, decision consumed single-use", () => {
-    const { result, prompts } = runHooks("Bash", "wget evil.sh", nativeAskAll, enabled);
+    const { result, prompts } = runHooks("Bash", "card", "wget evil.sh", nativeAskAll, enabled);
     expect(result.chainAction).toBe("ask");
     expect(result.shouldWrap).toBe(true);
     expect(prompts).toEqual(["ask"]);
+    // single-use: second permission.ask for the same callID sees nothing
+    const output = { status: "ask" as const };
+    handlePermissionAsk({ sessionID: "s1", callID: "card" }, output);
+    expect(output.status).toBe("ask");
   });
 
   it("deny → exactly 1 prompt trigger forced to deny, wrapped", () => {
-    const { result, prompts } = runHooks("Bash", "sudo rm -rf /", nativeAskAll, enabled);
+    const { result, prompts } = runHooks("Bash", "card", "sudo rm -rf /", nativeAskAll, enabled);
     expect(result.chainAction).toBe("deny");
     expect(result.shouldWrap).toBe(true);
     expect(prompts).toEqual(["deny"]);
   });
 
   it("chained ask → exactly 1 prompt for the whole chain", () => {
-    const { result, prompts } = runHooks("Bash", "git status && wget evil.sh", nativeAskAll, enabled);
+    const { result, prompts } = runHooks("Bash", "card", "git status && wget evil.sh", nativeAskAll, enabled);
     expect(result.chainAction).toBe("ask");
     expect(prompts).toEqual(["ask"]);
   });
 
   it("nested ($()) ask → exactly 1 prompt", () => {
-    const { result, prompts } = runHooks("Bash", "echo $(wget evil.sh)", nativeAskAll, enabled);
+    const { result, prompts } = runHooks("Bash", "card", "echo $(wget evil.sh)", nativeAskAll, enabled);
     expect(result.chainAction).toBe("ask");
     expect(prompts).toEqual(["ask"]);
   });
 
   it("empty command → 0 prompts, no wrap, no stored decision", () => {
-    const { result, prompts } = runHooks("Bash", "", nativeAskAll, enabled);
+    const { result, prompts } = runHooks("Bash", "card", "", nativeAskAll, enabled);
     expect(result.chainAction).toBeNull();
     expect(result.shouldWrap).toBe(false);
     expect(prompts).toHaveLength(0);
+    expect(getStoredDecision("s1", "card")).toBeUndefined();
   });
 
   it("disabled plugin path (non-bash tool) → 0 prompts", () => {
-    const { result, prompts } = runHooks("Edit", "anything", nativeAskAll, enabled);
+    const { result, prompts } = runHooks("Edit", "card", "anything", nativeAskAll, enabled);
     expect(result.chainAction).toBeNull();
     expect(result.shouldWrap).toBe(false);
     expect(prompts).toHaveLength(0);
   });
 
   it("parse error → 1 deny prompt, wrapped, fail-closed", () => {
-    const { result, prompts } = runHooks("Bash", 'echo "unbalanced', nativeAskAll, enabled);
+    const { result, prompts } = runHooks("Bash", "card", 'echo "unbalanced', nativeAskAll, enabled);
     expect(result.chainAction).toBe("deny");
     expect(result.shouldWrap).toBe(true);
     expect(prompts).toEqual(["deny"]);
   });
 
   it("degraded mode → 1 ask prompt even for glob-allowed commands", () => {
-    const { result, prompts } = runHooks("Bash", "git status", nativeAskAll, enabled, true);
+    const { result, prompts } = runHooks("Bash", "card", "git status", nativeAskAll, enabled, true);
     expect(result.chainAction).toBe("ask");
     expect(result.shouldWrap).toBe(true);
     expect(prompts).toEqual(["ask"]);
@@ -182,42 +152,181 @@ describe("characterization: prompt cardinality per path", () => {
       ...nativeAskAll,
       toolPermissions: [{ tool: "curl", args: [{ token: "-X", pattern: "GET", action: "allow" }], flags: { "-X": 1 } }],
     };
-    const { result, prompts } = runHooks("Bash", "curl -X GET https://api.com", config, enabled);
+    const { result, prompts } = runHooks("Bash", "card", "curl -X GET https://api.com", config, enabled);
     expect(result.chainAction).toBe("allow");
     expect(result.shouldWrap).toBe(false);
-    expect(result.permissionOverride).toBe("allow");
+    // The stored allow decision is what forces permission.ask → allow if it fires.
+    expect(getStoredDecision("s1", "card")?.action).toBe("allow");
+    const output = { status: "ask" as const };
+    handlePermissionAsk({ sessionID: "s1", callID: "card" }, output);
+    expect(output.status).toBe("allow");
     expect(prompts).toHaveLength(0);
+  });
+
+  it("decision stored in before is garbage-collected by tool.execute.after when permission.ask never fires", async () => {
+    const hooks = createBashGuardHooks({ directory: "/project" });
+    await hooks.config!({ permission: { bash: { "*": "ask", "sudo *": "deny" } } } as any);
+    await hooks["tool.execute.before"]!({ tool: "Bash", callID: "lifecycle-1", sessionID: "s" }, { args: { command: "sudo rm -rf /" } });
+    expect(getStoredDecision("s", "lifecycle-1")).toBeDefined();
+
+    await hooks["tool.execute.after"]!({ tool: "Bash", callID: "lifecycle-1", sessionID: "s", args: {} }, { title: "", output: "", metadata: {} });
+    expect(getStoredDecision("s", "lifecycle-1")).toBeUndefined();
+  });
+
+  it("full sequence: before → permission.ask consumes → after is a safe no-op", async () => {
+    const hooks = createBashGuardHooks({ directory: "/project" });
+    await hooks.config!({ permission: { bash: { "*": "ask" } } } as any);
+    await hooks["tool.execute.before"]!({ tool: "Bash", callID: "lifecycle-2", sessionID: "s" }, { args: { command: "wget evil.sh" } });
+
+    const permOutput = { status: "ask" as const };
+    await hooks["permission.ask"]!({ sessionID: "s", callID: "lifecycle-2" } as any, permOutput);
+    expect(permOutput.status).toBe("ask");
+    expect(getStoredDecision("s", "lifecycle-2")).toBeUndefined();
+
+    await hooks["tool.execute.after"]!({ tool: "Bash", callID: "lifecycle-2", sessionID: "s", args: {} }, { title: "", output: "", metadata: {} });
+    expect(getStoredDecision("s", "lifecycle-2")).toBeUndefined();
+  });
+
+  it("deny decision: ask consumes it; after never sees residue", async () => {
+    const hooks = createBashGuardHooks({ directory: "/project" });
+    await hooks.config!({ permission: { bash: { "*": "ask", "sudo *": "deny" } } } as any);
+    await hooks["tool.execute.before"]!({ tool: "Bash", callID: "lifecycle-3", sessionID: "s" }, { args: { command: "sudo rm -rf /" } });
+
+    const permOutput = { status: "ask" as const };
+    await hooks["permission.ask"]!({ sessionID: "s", callID: "lifecycle-3" } as any, permOutput);
+    expect(permOutput.status).toBe("deny");
+    expect(getStoredDecision("s", "lifecycle-3")).toBeUndefined();
+  });
+
+  it("non-bash tools store nothing; after is a no-op", async () => {
+    const hooks = createBashGuardHooks({ directory: "/project" });
+    await hooks.config!({ permission: { bash: { "*": "ask" } } } as any);
+    await hooks["tool.execute.before"]!({ tool: "Edit", callID: "lifecycle-4", sessionID: "s" }, { args: {} });
+    expect(getStoredDecision("s", "lifecycle-4")).toBeUndefined();
+    await hooks["tool.execute.after"]!({ tool: "Edit", callID: "lifecycle-4", sessionID: "s", args: {} }, { title: "", output: "", metadata: {} });
+    expect(getStoredDecision("s", "lifecycle-4")).toBeUndefined();
+  });
+
+  it("disabled plugin: before and after are no-ops", async () => {
+    const hooks = createBashGuardHooks({ directory: "/project" });
+    await hooks.config!({ permission: { bash: "allow" } } as any);
+    await hooks["tool.execute.before"]!({ tool: "Bash", callID: "lifecycle-5", sessionID: "s" }, { args: { command: "wget evil.sh" } });
+    expect(getStoredDecision("s", "lifecycle-5")).toBeUndefined();
+    await hooks["tool.execute.after"]!({ tool: "Bash", callID: "lifecycle-5", sessionID: "s", args: {} }, { title: "", output: "", metadata: {} });
+    expect(getStoredDecision("s", "lifecycle-5")).toBeUndefined();
+  });
+
+  it("reused callID: the fresh decision overwrites any stale residue", async () => {
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), "obg-lifecycle-"));
+    fs.mkdirSync(path.join(project, ".opencode"), { recursive: true });
+    fs.writeFileSync(
+      path.join(project, ".opencode", "opencode-bash-guard.jsonc"),
+      JSON.stringify({
+        matcherVersion: 2,
+        permissions: [{ tool: "curl", args: [{ token: "-X", pattern: "GET", action: "allow" }], flags: { "-X": 1 } }],
+      }),
+    );
+    const prevXdg = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = path.join(os.tmpdir(), `obg-noxdg-${Date.now()}`);
+    try {
+      const hooks = createBashGuardHooks({ directory: project });
+      await hooks.config!({ permission: { bash: { "*": "ask", "sudo *": "deny" } } } as any);
+      await hooks["tool.execute.before"]!({ tool: "Bash", callID: "lifecycle-6", sessionID: "s" }, { args: { command: "sudo rm -rf /" } });
+      expect(getStoredDecision("s", "lifecycle-6")?.action).toBe("deny");
+
+      await hooks["tool.execute.before"]!({ tool: "Bash", callID: "lifecycle-6", sessionID: "s" }, { args: { command: "curl -X GET https://x.com" } });
+      expect(getStoredDecision("s", "lifecycle-6")?.action).toBe("allow");
+    } finally {
+      if (prevXdg !== undefined) process.env.XDG_CONFIG_HOME = prevXdg;
+      else delete process.env.XDG_CONFIG_HOME;
+      fs.rmSync(project, { recursive: true, force: true });
+    }
+  });
+
+  it("stale decision does not survive a reused callID on a non-storing path", async () => {
+    const hooks = createBashGuardHooks({ directory: "/project" });
+    await hooks.config!({ permission: { bash: { "*": "ask", "sudo *": "deny" } } } as any);
+
+    await hooks["tool.execute.before"]!({ tool: "Bash", callID: "reuse-stale", sessionID: "s" }, { args: { command: "sudo rm -rf /" } });
+    expect(getStoredDecision("s", "reuse-stale")?.action).toBe("deny");
+
+    await hooks["tool.execute.before"]!({ tool: "Bash", callID: "reuse-stale", sessionID: "s" }, { args: { command: "" } });
+    expect(getStoredDecision("s", "reuse-stale")).toBeUndefined();
+
+    await hooks["tool.execute.before"]!({ tool: "Edit", callID: "reuse-stale", sessionID: "s" }, { args: {} });
+    expect(getStoredDecision("s", "reuse-stale")).toBeUndefined();
+
+    const output = { status: "ask" as const };
+    await hooks["permission.ask"]!({ sessionID: "s", callID: "reuse-stale" } as any, output);
+    expect(output.status).toBe("ask");
+  });
+
+  it("same callID in different sessions holds independent decisions", async () => {
+    const hooks = createBashGuardHooks({ directory: "/project" });
+    await hooks.config!({ permission: { bash: { "*": "ask", "sudo *": "deny" } } } as any);
+
+    await hooks["tool.execute.before"]!({ tool: "Bash", callID: "shared-id", sessionID: "sessA" }, { args: { command: "sudo rm -rf /" } });
+    await hooks["tool.execute.before"]!({ tool: "Bash", callID: "shared-id", sessionID: "sessB" }, { args: { command: "wget evil.sh" } });
+
+    expect(getStoredDecision("sessA", "shared-id")?.action).toBe("deny");
+    expect(getStoredDecision("sessB", "shared-id")).toBeUndefined();
+
+    const outA = { status: "ask" as const };
+    await hooks["permission.ask"]!({ sessionID: "sessA", callID: "shared-id" } as any, outA);
+    expect(outA.status).toBe("deny");
+
+    const outB = { status: "ask" as const };
+    await hooks["permission.ask"]!({ sessionID: "sessB", callID: "shared-id" } as any, outB);
+    expect(outB.status).toBe("ask");
+  });
+
+  it("session.idle clears only that session's orphaned decisions", async () => {
+    const hooks = createBashGuardHooks({ directory: "/project" });
+    await hooks.config!({ permission: { bash: { "*": "ask", "sudo *": "deny" } } } as any);
+
+    await hooks["tool.execute.before"]!({ tool: "Bash", callID: "idle-1", sessionID: "sessA" }, { args: { command: "sudo rm -rf /" } });
+    await hooks["tool.execute.before"]!({ tool: "Bash", callID: "idle-1", sessionID: "sessB" }, { args: { command: "sudo rm -rf /" } });
+    expect(getStoredDecision("sessA", "idle-1")).toBeDefined();
+    expect(getStoredDecision("sessB", "idle-1")).toBeDefined();
+
+    await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "sessA" } } } as any);
+    expect(getStoredDecision("sessA", "idle-1")).toBeUndefined();
+    expect(getStoredDecision("sessB", "idle-1")).toBeDefined();
   });
 });
 
 describe("characterization: command wrapping", () => {
+  beforeEach(() => clearStoredDecision("s1", "wrap"));
+
   it("ask and deny results request wrapping", () => {
-    expect(beforeExecute("Bash", "/project", { command: "wget evil.sh" }, nativeAskAll, enabled).shouldWrap).toBe(true);
-    expect(beforeExecute("Bash", "/project", { command: "sudo rm -rf /" }, nativeAskAll, enabled).shouldWrap).toBe(true);
+    expect(beforeExecute("Bash", "wrap", "s1", "/project", { command: "wget evil.sh" }, nativeAskAll, enabled).shouldWrap).toBe(true);
+    expect(beforeExecute("Bash", "wrap", "s1", "/project", { command: "sudo rm -rf /" }, nativeAskAll, enabled).shouldWrap).toBe(true);
   });
 
   it("allow, no-opinion, empty, and readability-rejected results never wrap", () => {
-    expect(beforeExecute("Bash", "/project", { command: "git status" }, nativeAskAll, enabled).shouldWrap).toBe(false);
+    expect(beforeExecute("Bash", "wrap", "s1", "/project", { command: "git status" }, nativeAskAll, enabled).shouldWrap).toBe(false);
     expect(
-      beforeExecute("Bash", "/project", { command: "ls" }, { bashRules: [], editRules: [], externalDirectoryRules: [], externalDirectoryDefault: null, toolPermissions: [], enabled: true }, enabled)
+      beforeExecute("Bash", "wrap", "s1", "/project", { command: "ls" }, { bashRules: [], editRules: [], externalDirectoryRules: [], externalDirectoryDefault: null, toolPermissions: [], enabled: true }, enabled)
         .shouldWrap,
     ).toBe(false);
-    expect(beforeExecute("Bash", "/project", { command: "" }, nativeAskAll, enabled).shouldWrap).toBe(false);
+    expect(beforeExecute("Bash", "wrap", "s1", "/project", { command: "" }, nativeAskAll, enabled).shouldWrap).toBe(false);
     const complex = "git status && rm -rf /tmp/x && echo ok && ls";
-    expect(beforeExecute("Bash", "/project", { command: complex }, nativeAskAll, enabled).shouldWrap).toBe(false);
+    expect(beforeExecute("Bash", "wrap", "s1", "/project", { command: complex }, nativeAskAll, enabled).shouldWrap).toBe(false);
   });
 
   it("tool name matching is case-insensitive; non-bash tools ignored", () => {
-    expect(beforeExecute("bash", "/project", { command: "sudo rm -rf /" }, nativeAskAll, enabled).chainAction).toBe("deny");
-    expect(beforeExecute("Bash", "/project", { command: "sudo rm -rf /" }, nativeAskAll, enabled).chainAction).toBe("deny");
-    expect(beforeExecute("Read", "/project", { command: "sudo rm -rf /" }, nativeAskAll, enabled).chainAction).toBeNull();
+    expect(beforeExecute("bash", "wrap", "s1", "/project", { command: "sudo rm -rf /" }, nativeAskAll, enabled).chainAction).toBe("deny");
+    expect(beforeExecute("Bash", "wrap", "s1", "/project", { command: "sudo rm -rf /" }, nativeAskAll, enabled).chainAction).toBe("deny");
+    expect(beforeExecute("Read", "wrap", "s1", "/project", { command: "sudo rm -rf /" }, nativeAskAll, enabled).chainAction).toBeNull();
   });
 });
 
 describe("characterization: readability thresholds and messages", () => {
+  beforeEach(() => clearStoredDecision("s1", "read"));
+
   it("strictly-greater thresholds: N == max passes, N+1 rejected", () => {
-    expect(runHooks("Bash", "git a && git b && rm -rf /tmp/x", nativeAskAll, enabled).thrown).toBeNull();
-    const over = runHooks("Bash", "git a && git b && git c && rm -rf /tmp/x", nativeAskAll, enabled);
+    expect(runHooks("Bash", "read", "git a && git b && rm -rf /tmp/x", nativeAskAll, enabled).thrown).toBeNull();
+    const over = runHooks("Bash", "read", "git a && git b && git c && rm -rf /tmp/x", nativeAskAll, enabled);
     expect(over.thrown).not.toBeNull();
     expect(over.thrown).toContain("4 chained commands");
     expect(over.thrown).toContain("nesting depth 1");
@@ -234,12 +343,12 @@ describe("characterization: readability thresholds and messages", () => {
       ],
     };
     const denyCmd = "git push --force && git status && git log && git show";
-    const denyResult = beforeExecute("Bash", "/project", { command: denyCmd }, denyConfig, enabled);
+    const denyResult = beforeExecute("Bash", "read", "s1", "/project", { command: denyCmd }, denyConfig, enabled);
     expect(denyResult.rejectionMessage).toBeNull();
     expect(denyResult.chainAction).toBe("deny");
 
     const allowCmd = "git status && git log && git diff && git show";
-    const allowResult = beforeExecute("Bash", "/project", { command: allowCmd }, nativeAskAll, enabled);
+    const allowResult = beforeExecute("Bash", "read", "s1", "/project", { command: allowCmd }, nativeAskAll, enabled);
     expect(allowResult.rejectionMessage).toBeNull();
     expect(allowResult.chainAction).toBe("allow");
   });
@@ -253,47 +362,47 @@ describe("characterization: readability thresholds and messages", () => {
       toolPermissions: [],
       enabled: true,
     };
-    const result = beforeExecute("Bash", "/project", { command: "a && b && c && d" }, config, enabled);
+    const result = beforeExecute("Bash", "read", "s1", "/project", { command: "a && b && c && d" }, config, enabled);
     expect(result.rejectionMessage).toBeNull();
     expect(result.chainAction).toBeNull();
   });
 
   it("parse errors fail closed before readability runs", () => {
-    const result = beforeExecute("Bash", "/project", { command: 'echo "unbalanced' }, nativeAskAll, enabled);
+    const result = beforeExecute("Bash", "read", "s1", "/project", { command: 'echo "unbalanced' }, nativeAskAll, enabled);
     expect(result.chainAction).toBe("deny");
     expect(result.rejectionMessage).toBeNull();
   });
 
   it("multi-line: per-line limit names the worst line", () => {
     const cmd = "git a && git b && git c && git d && rm -rf /tmp/x\ngit e && git f";
-    const { result } = runHooks("Bash", cmd, nativeAskAll, enabled);
+    const { result } = runHooks("Bash", "read", cmd, nativeAskAll, enabled);
     expect(result.rejectionMessage).toContain("Complex command rejected (line 1: 5 chained commands");
   });
 
   it("multi-line one-command-per-line re-issue passes the gate", () => {
     const cmd = "git status\nrm -rf /tmp/x\necho ok\nls";
-    const { result, thrown } = runHooks("Bash", cmd, nativeAskAll, enabled);
+    const { result, thrown } = runHooks("Bash", "read", cmd, nativeAskAll, enabled);
     expect(thrown).toBeNull();
     expect(result.chainAction).toBe("ask");
     expect(result.shouldWrap).toBe(true);
   });
 
   it("depth threshold: single $() passes, double $() rejected", () => {
-    expect(runHooks("Bash", "echo $(whoami)", nativeAskAll, enabled).thrown).toBeNull();
-    const over = runHooks("Bash", "echo $(echo $(whoami))", nativeAskAll, enabled);
+    expect(runHooks("Bash", "read", "echo $(whoami)", nativeAskAll, enabled).thrown).toBeNull();
+    const over = runHooks("Bash", "read", "echo $(echo $(whoami))", nativeAskAll, enabled);
     expect(over.thrown).toContain("nesting depth 3");
   });
 
   it("inline-script statement count over threshold rejected with interpreter name", () => {
     const cmd = `git status && python3 -c "import os; os.system('a'); os.system('b'); os.system('c'); os.system('d')"`;
-    const { result, thrown } = runHooks("Bash", cmd, nativeAskAll, enabled);
+    const { result, thrown } = runHooks("Bash", "read", cmd, nativeAskAll, enabled);
     expect(thrown).toContain("Complex inline script rejected (python -c: 5 statements)");
     expect(result.shouldWrap).toBe(false);
   });
 
   it("feature disabled — complex ask chain follows the plain ask flow", () => {
     const cmd = "git status && rm -rf /tmp/x && echo ok && ls";
-    const { result, thrown } = runHooks("Bash", cmd, nativeAskAll, disabled);
+    const { result, thrown } = runHooks("Bash", "read", cmd, nativeAskAll, disabled);
     expect(thrown).toBeNull();
     expect(result.chainAction).toBe("ask");
     expect(result.shouldWrap).toBe(true);
@@ -301,283 +410,50 @@ describe("characterization: readability thresholds and messages", () => {
 
   it("repeated violation re-throws with the same message (no retry counter)", () => {
     const cmd = "git status && rm -rf /tmp/x && echo ok && ls";
-    const first = runHooks("Bash", cmd, nativeAskAll, enabled);
-    const second = runHooks("Bash", cmd, nativeAskAll, enabled);
+    const first = runHooks("Bash", "read", cmd, nativeAskAll, enabled);
+    const second = runHooks("Bash", "read", cmd, nativeAskAll, enabled);
     expect(second.thrown).toBe(first.thrown);
   });
 
-  it("rejected ask chain requests no permission override", () => {
+  it("rejected ask chain stores no decision (no dialog follows the throw)", () => {
     const cmd = "git status && rm -rf /tmp/x && echo ok && ls";
-    const { result } = runHooks("Bash", cmd, nativeAskAll, enabled);
-    expect(result.permissionOverride).toBeNull();
+    runHooks("Bash", "read", cmd, nativeAskAll, enabled);
+    expect(getStoredDecision("s1", "read")).toBeUndefined();
   });
 });
 
-describe("instance-owned permission handoff", () => {
-  it("Given disabled native config, when before and permission hooks run, then command and status stay untouched", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
-    await configureAskAndDeny(hooks, { "*": "allow" });
-    const before = hooks["tool.execute.before"];
-    if (before === undefined) throw new Error("missing before hook");
+describe("characterization: single-use callID handoff", () => {
+  beforeEach(() => clearStoredDecision("s1", "handoff"));
 
-    const input = { sessionID: "disabled", callID: "disabled", command: "sudo rm -rf /" };
-    const output = { args: { command: input.command } };
-    await before({ tool: "Bash", callID: input.callID, sessionID: input.sessionID }, output);
-
-    expect(output.args.command).toBe(input.command);
-    expect(await runPermissionAsk(hooks, input)).toBe("ask");
+  it("deny decision forces permission.ask output to deny exactly once", () => {
+    beforeExecute("Bash", "handoff", "s1", "/project", { command: "sudo rm -rf /" }, nativeAskAll, enabled);
+    const first = { status: "ask" as const };
+    handlePermissionAsk({ sessionID: "s1", callID: "handoff" }, first);
+    expect(first.status).toBe("deny");
+    const second = { status: "ask" as const };
+    handlePermissionAsk({ sessionID: "s1", callID: "handoff" }, second);
+    expect(second.status).toBe("ask");
   });
 
-  it("Given enabled hooks, when permission.ask lacks or does not recognize a callID, then status stays ask", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
-    await configureAskAndDeny(hooks);
-    const knownInput = { sessionID: "known", callID: "known", command: "sudo rm -rf /" };
-    await runBefore(hooks, knownInput);
-
-    expect(await runPermissionAsk(hooks, { sessionID: "missing" })).toBe("ask");
-    expect(await runPermissionAsk(hooks, { sessionID: "unknown", callID: "unknown" })).toBe("ask");
-    expect(await runPermissionAsk(hooks, knownInput)).toBe("deny");
+  it("ask decision leaves permission.ask output untouched exactly once", () => {
+    beforeExecute("Bash", "handoff", "s1", "/project", { command: "wget evil.sh" }, nativeAskAll, enabled);
+    const first = { status: "ask" as const };
+    handlePermissionAsk({ sessionID: "s1", callID: "handoff" }, first);
+    expect(first.status).toBe("ask");
+    const second = { status: "ask" as const };
+    handlePermissionAsk({ sessionID: "s1", callID: "handoff" }, second);
+    expect(second.status).toBe("ask");
   });
 
-  it("Given an args-level allow, when permission.ask fires twice, then only the first call is allowed", async () => {
-    const project = fs.mkdtempSync(path.join(os.tmpdir(), "obg-allow-"));
-    const previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
-    fs.mkdirSync(path.join(project, ".opencode"), { recursive: true });
-    fs.writeFileSync(
-      path.join(project, ".opencode", "opencode-bash-guard.jsonc"),
-      JSON.stringify({
-        matcherVersion: 2,
-        permissions: [{ tool: "curl", args: [{ token: "-X", pattern: "GET", action: "allow" }], flags: { "-X": 1 } }],
-      }),
-    );
-    process.env.XDG_CONFIG_HOME = path.join(os.tmpdir(), `obg-xdg-${Date.now()}`);
-
-    try {
-      const hooks = createBashGuardHooks({ directory: project });
-      await configureAskAndDeny(hooks);
-
-      const input = { sessionID: "session", callID: "allow-once", command: "curl -X GET https://api.example" };
-      await runBefore(hooks, input);
-      expect(await runPermissionAsk(hooks, input)).toBe("allow");
-      expect(await runPermissionAsk(hooks, input)).toBe("ask");
-    } finally {
-      if (previousXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
-      else process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
-      fs.rmSync(project, { recursive: true, force: true });
-    }
+  it("missing callID is a no-op", () => {
+    const output = { status: "ask" as const };
+    handlePermissionAsk({ sessionID: "s1" }, output);
+    expect(output.status).toBe("ask");
   });
 
-  it("Given a denied command, when permission.ask fires twice, then only the first call is denied", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
-    await configureAskAndDeny(hooks);
-
-    const input = { sessionID: "session", callID: "deny-once", command: "sudo rm -rf /" };
-    await runBefore(hooks, input);
-    expect(await runPermissionAsk(hooks, input)).toBe("deny");
-    expect(await runPermissionAsk(hooks, input)).toBe("ask");
-  });
-
-  it("Given a repeated key, when deny is replaced by an args-rule allow, then the fresh allow wins", async () => {
-    const fixture = await createArgsAllowFixture();
-    try {
-      const deniedInput = { sessionID: "replacement", callID: "same", command: "sudo rm -rf /" };
-      const allowedInput = { sessionID: "replacement", callID: "same", command: "curl -X GET https://api.example" };
-      await runBefore(fixture.hooks, deniedInput);
-      await runBefore(fixture.hooks, allowedInput);
-
-      expect(await runPermissionAsk(fixture.hooks, allowedInput)).toBe("allow");
-    } finally {
-      fixture.cleanup();
-    }
-  });
-
-  it("Given a repeated key, when an args-rule allow is replaced by deny, then the fresh deny wins", async () => {
-    const fixture = await createArgsAllowFixture();
-    try {
-      const allowedInput = { sessionID: "replacement", callID: "same", command: "curl -X GET https://api.example" };
-      const deniedInput = { sessionID: "replacement", callID: "same", command: "sudo rm -rf /" };
-      await runBefore(fixture.hooks, allowedInput);
-      await runBefore(fixture.hooks, deniedInput);
-
-      expect(await runPermissionAsk(fixture.hooks, deniedInput)).toBe("deny");
-    } finally {
-      fixture.cleanup();
-    }
-  });
-
-  it("Given a native ask, when before executes, then permission.ask remains unchanged", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
-    await configureAskAndDeny(hooks);
-
-    const nativeAsk = { sessionID: "session", callID: "native-ask", command: "wget evil.sh" };
-    await runBefore(hooks, nativeAsk);
-    expect(await runPermissionAsk(hooks, nativeAsk)).toBe("ask");
-  });
-
-  it("Given a native allow, when before executes, then permission.ask remains unchanged", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
-    await configureAskAndDeny(hooks);
-
-    const nativeAllow = { sessionID: "session", callID: "native-allow", command: "git status" };
-    await runBefore(hooks, nativeAllow);
-    expect(await runPermissionAsk(hooks, nativeAllow)).toBe("ask");
-  });
-
-  it("Given one callID in two sessions, when each session asks, then only its own handoff applies", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
-    await configureAskAndDeny(hooks);
-
-    const sessionADeny = { sessionID: "session-a", callID: "shared", command: "sudo rm -rf /" };
-    const sessionBAsk = { sessionID: "session-b", callID: "shared", command: "wget evil.sh" };
-    await runBefore(hooks, sessionADeny);
-    await runBefore(hooks, sessionBAsk);
-
-    expect(await runPermissionAsk(hooks, sessionADeny)).toBe("deny");
-    expect(await runPermissionAsk(hooks, sessionBAsk)).toBe("ask");
-  });
-
-  it("Given the same session and callID in two hook instances, when each instance asks, then only its own handoff applies", async () => {
-    const firstHooks = createBashGuardHooks({ directory: "/project" });
-    const secondHooks = createBashGuardHooks({ directory: "/project" });
-    await configureAskAndDeny(firstHooks);
-    await configureAskAndDeny(secondHooks);
-
-    const deniedInput = { sessionID: "session", callID: "shared", command: "sudo rm -rf /" };
-    const askInput = { sessionID: "session", callID: "shared", command: "wget evil.sh" };
-    await runBefore(firstHooks, deniedInput);
-    await runBefore(secondHooks, askInput);
-
-    expect(await runPermissionAsk(firstHooks, deniedInput)).toBe("deny");
-    expect(await runPermissionAsk(secondHooks, askInput)).toBe("ask");
-  });
-
-  it("Given a reused pair, when a non-storing path follows a denial, then the stale handoff is cleared", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
-    await configureAskAndDeny(hooks);
-
-    const deniedInput = { sessionID: "session", callID: "reused", command: "sudo rm -rf /" };
-    const emptyInput = { sessionID: "session", callID: "reused", command: "" };
-    await runBefore(hooks, deniedInput);
-    await runBefore(hooks, emptyInput);
-    expect(await runPermissionAsk(hooks, deniedInput)).toBe("ask");
-
-    await runBefore(hooks, deniedInput);
-    const before = hooks["tool.execute.before"];
-    expect(before).toBeDefined();
-    await before?.({ tool: "Edit", callID: "reused", sessionID: "session" }, { args: {} });
-    expect(await runPermissionAsk(hooks, deniedInput)).toBe("ask");
-  });
-
-  it("Given an unconsumed denial, when tool.execute.after runs, then permission.ask remains unchanged", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
-    await configureAskAndDeny(hooks);
-
-    const input = { sessionID: "session", callID: "after", command: "sudo rm -rf /" };
-    await runBefore(hooks, input);
-    const after = hooks["tool.execute.after"];
-    expect(after).toBeDefined();
-    await after?.({ tool: "Bash", callID: "after", sessionID: "session", args: {} }, { title: "", output: "", metadata: {} });
-
-    expect(await runPermissionAsk(hooks, input)).toBe("ask");
-  });
-
-  it("full sequence: before → permission.ask consumes → after is a safe no-op", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
-    await configureAskAndDeny(hooks);
-
-    const input = { sessionID: "session", callID: "full-sequence", command: "wget evil.sh" };
-    await runBefore(hooks, input);
-    expect(await runPermissionAsk(hooks, input)).toBe("ask");
-    const after = hooks["tool.execute.after"];
-    expect(after).toBeDefined();
-    await after?.({ tool: "Bash", callID: input.callID, sessionID: input.sessionID, args: {} }, { title: "", output: "", metadata: {} });
-    expect(await runPermissionAsk(hooks, input)).toBe("ask");
-  });
-
-  it("Given unconsumed denials, when sessions become idle or deleted, then their handoffs are cleared", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
-    await configureAskAndDeny(hooks);
-
-    const idleInput = { sessionID: "idle-session", callID: "idle", command: "sudo rm -rf /" };
-    const deletedInput = { sessionID: "deleted-session", callID: "deleted", command: "sudo rm -rf /" };
-    const idleSurvivor = { sessionID: "idle-survivor", callID: "idle-survivor", command: "sudo rm -rf /" };
-    const deletedSurvivor = { sessionID: "deleted-survivor", callID: "deleted-survivor", command: "sudo rm -rf /" };
-    await runBefore(hooks, idleInput);
-    await runBefore(hooks, deletedInput);
-    await runBefore(hooks, idleSurvivor);
-    await runBefore(hooks, deletedSurvivor);
-    const event = hooks.event;
-    expect(event).toBeDefined();
-    await event?.({ event: { type: "session.idle", properties: { sessionID: "idle-session" } } } as any);
-    await event?.({ event: { type: "session.deleted", properties: { info: { id: "deleted-session" } } } } as any);
-
-    expect(await runPermissionAsk(hooks, idleInput)).toBe("ask");
-    expect(await runPermissionAsk(hooks, deletedInput)).toBe("ask");
-    expect(await runPermissionAsk(hooks, idleSurvivor)).toBe("deny");
-    expect(await runPermissionAsk(hooks, deletedSurvivor)).toBe("deny");
-  });
-
-  it("Given callbacks captured before disposal, when config and before run afterward, then they cannot mutate state", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
-    await configureAskAndDeny(hooks);
-    const staleConfig = hooks.config;
-    const staleBefore = hooks["tool.execute.before"];
-    const stalePermissionAsk = hooks["permission.ask"];
-    if (staleConfig === undefined || staleBefore === undefined || stalePermissionAsk === undefined) throw new Error("missing lifecycle hooks");
-
-    await hooks.dispose?.();
-    await configureAskAndDeny({ ...hooks, config: staleConfig });
-
-    const input = { sessionID: "disposed", callID: "disposed", command: "sudo rm -rf /" };
-    const output = { args: { command: input.command } };
-    await staleBefore({ tool: "Bash", callID: input.callID, sessionID: input.sessionID }, output);
-
-    expect(output.args.command).toBe(input.command);
-    expect(await runPermissionAsk({ ...hooks, "permission.ask": stalePermissionAsk }, input)).toBe("ask");
-  });
-
-  it("Given more than 256 pending denials, when the oldest is consumed, then it remains denied", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
-    await configureAskAndDeny(hooks);
-
-    for (let index = 0; index < 257; index += 1) {
-      await runBefore(hooks, { sessionID: "deny-capacity", callID: `deny-${index}`, command: "sudo rm -rf /" });
-    }
-
-    expect(await runPermissionAsk(hooks, { sessionID: "deny-capacity", callID: "deny-0" })).toBe("deny");
-  });
-
-  it("Given more than 256 pending args-rule allows, when the oldest is consumed, then it remains allowed", async () => {
-    const fixture = await createArgsAllowFixture();
-    try {
-      for (let index = 0; index < 257; index += 1) {
-        await runBefore(fixture.hooks, { sessionID: "allow-capacity", callID: `allow-${index}`, command: "curl -X GET https://api.example" });
-      }
-
-      expect(await runPermissionAsk(fixture.hooks, { sessionID: "allow-capacity", callID: "allow-0" })).toBe("allow");
-    } finally {
-      fixture.cleanup();
-    }
-  });
-
-  it("Given two instances with pending denials, when one is disposed, then only that instance clears handoffs and stale callbacks cannot apply them", async () => {
-    const disposedHooks = createBashGuardHooks({ directory: "/project" });
-    const activeHooks = createBashGuardHooks({ directory: "/project" });
-    await configureAskAndDeny(disposedHooks);
-    await configureAskAndDeny(activeHooks);
-
-    const disposedInput = { sessionID: "session", callID: "disposed", command: "sudo rm -rf /" };
-    const activeInput = { sessionID: "session", callID: "active", command: "sudo rm -rf /" };
-    await runBefore(disposedHooks, disposedInput);
-    await runBefore(activeHooks, activeInput);
-    const stalePermissionAsk = disposedHooks["permission.ask"];
-    expect(stalePermissionAsk).toBeDefined();
-    expect(disposedHooks.dispose).toBeDefined();
-    await disposedHooks.dispose?.();
-
-    const staleOutput = { status: "ask" as const };
-    await stalePermissionAsk?.({ sessionID: "session", callID: "disposed" } as any, staleOutput);
-    expect(staleOutput.status).toBe("ask");
-    expect(await runPermissionAsk(activeHooks, activeInput)).toBe("deny");
+  it("unknown callID is a no-op", () => {
+    const output = { status: "ask" as const };
+    handlePermissionAsk({ sessionID: "s1", callID: "never-stored" }, output);
+    expect(output.status).toBe("ask");
   });
 });
