@@ -37,4 +37,4 @@
 - [x] 6.2 Resolve bare `~` and `~/...` against the current home while forcing `ask` for unsupported named-user tilde paths.
 - [x] 6.3 Ignore only missing plugin config files; warn and enter global degraded ask for every other read failure.
 - [x] 6.4 Align README, active specifications, and characterization labels with implemented behavior and adapter-level verification.
-- [ ] 6.5 Run the complete remote test and build workflow after review hardening.
+- [x] 6.5 Run the complete remote test and build workflow after review hardening.
