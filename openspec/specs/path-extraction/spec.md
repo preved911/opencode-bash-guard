@@ -32,7 +32,7 @@ The system SHALL treat suffix words that do not start with `-` as candidate path
 
 ### Requirement: Resolve paths
 
-Each supported path token SHALL be resolved to an absolute path. Relative paths SHALL be resolved against the current working directory (`input.cwd` from `tool.execute.before`). Bare `~` and `~/...` SHALL be expanded to the current user's home directory. Named-user forms such as `~other/...` SHALL remain unresolved and force an `ask` decision rather than being interpreted relative to the current user or project.
+Each wholly static path token SHALL be quote-decoded and resolved to an absolute path. Relative paths SHALL be resolved against the current working directory (`input.cwd` from `tool.execute.before`). Bare `~` and `~/...` SHALL be expanded to the current user's home directory. Named-user forms such as `~other/...`, and operands whose value depends on shell expansion, SHALL remain unresolved and force an `ask` decision rather than being interpreted relative to the current user or project.
 
 #### Scenario: Relative path
 - **WHEN** the path is `./src` and cwd is `/project`
@@ -52,7 +52,7 @@ Each supported path token SHALL be resolved to an absolute path. Relative paths 
 
 ### Requirement: Extract redirect targets
 
-The system SHALL collect each segment's redirects — both command-level and statement-level — recording the operator, target text, and file descriptor. Redirections remain excluded from word-argument extraction. Well-known redirects SHALL be flagged and excluded from path checking: the target `/dev/null`, numeric-only targets (file-descriptor duplicates such as `2>&1`), and heredoc operators (`<<`, `<<-`, `<<<`). All other targets SHALL be captured for permission checking.
+The system SHALL collect each segment's redirects — both command-level and statement-level — recording the operator, target text, and file descriptor. Redirections remain excluded from word-argument extraction. Well-known redirects SHALL be flagged and excluded from path checking: the target `/dev/null`, numeric or `-` targets only for file-descriptor operators `<&` and `>&`, and heredoc operators (`<<`, `<<-`, `<<<`). A numeric target of a file redirect such as `2>1` is a filename and SHALL be checked. Heredoc bodies SHALL be preserved separately from their delimiter for executable-substitution traversal and inline-script readability checks. All other targets SHALL be captured for permission checking.
 
 #### Scenario: File redirect captured
 - **WHEN** the segment is `ls -la > /tmp/out.txt`

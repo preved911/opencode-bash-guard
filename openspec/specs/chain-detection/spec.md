@@ -32,7 +32,7 @@ The system SHALL use `unbash` to parse the full command string into an AST. The 
 
 ### Requirement: Extract commands from command substitutions and backticks
 
-The system SHALL recursively walk the AST to find ALL commands, including those nested inside `$(...)` command substitutions and backtick `` `...` `` expressions. Each nested command SHALL be checked against bash permission patterns independently. Traversal SHALL enforce finite depth and invocation budgets; exceeding either budget SHALL produce a parse error so enforcement fails closed.
+The system SHALL recursively walk every executable-bearing AST field, including commands nested inside `$(...)`, backticks, redirects, assignments, tests, arithmetic expressions, loop headers, case words and patterns, and parameter operands. Each nested command SHALL be checked independently. Traversal SHALL enforce independent command-context depth, structural depth, visited-value, and invocation budgets; exceeding any budget SHALL produce a parse error so enforcement fails closed.
 
 #### Scenario: Command in $() is extracted
 - **WHEN** the command is `cat $(find . -name "*.txt")`
@@ -61,10 +61,11 @@ The system SHALL recursively walk the AST to find ALL commands, including those 
 ### Requirement: Recursively parse eval and shell -c arguments
 
 The system SHALL recognize meta-commands that execute string arguments as shell commands:
-- `eval <string>` — the first non-flag argument is a command string
-- `sh -c <string>`, `bash -c <string>`, `zsh -c <string>`, `ksh -c <string>` — the value after `-c` is a command string
+- `eval [--] <string...>` — an optional leading `--` terminates options and the remaining static operands form the command string
+- `sh -c <string>`, `bash -c <string>`, `zsh -c <string>`, `ksh -c <string>`, `dash -c <string>` — including supported executable paths by basename — use the value after `-c` as a command string
 
 The string argument SHALL be parsed as a separate command using `unbash`, and all extracted commands from it SHALL be added to the segment's command list for permission checking.
+Shell option scanning SHALL stop at `--` or the first script operand; a later `-c` argument SHALL NOT be treated as executable source.
 
 #### Scenario: eval with dangerous command
 - **WHEN** the command is `eval "rm -rf /"`
