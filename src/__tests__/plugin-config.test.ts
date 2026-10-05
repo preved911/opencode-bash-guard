@@ -53,6 +53,19 @@ describe("readPluginConfigFiles", () => {
       fs.unlinkSync(existing);
     }
   });
+
+  it("retains non-ENOENT read failures for degraded parsing", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const denied = Object.assign(new Error("permission denied"), { code: "EACCES" });
+    vi.spyOn(fs, "readFileSync").mockImplementation(() => {
+      throw denied;
+    });
+
+    const files = readPluginConfigFiles(["/unreadable/opencode-bash-guard.jsonc"]);
+    expect(files).toEqual([{ path: "/unreadable/opencode-bash-guard.jsonc", readError: "permission denied" }]);
+    expect(parsePluginConfig(files).degraded).toBe(true);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("/unreadable/opencode-bash-guard.jsonc"));
+  });
 });
 
 describe("parsePluginConfig", () => {
