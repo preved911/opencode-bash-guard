@@ -267,11 +267,12 @@ describe("characterization: nesting depth", () => {
 
 describe("characterization: inline-script detection", () => {
   function seg(command: string, redirects: NormalizedInvocation["redirects"] = []): NormalizedInvocation {
-    return { command, commandName: command.split(/\s+/)[0] ?? "", argv: command.split(/\s+/), redirects, candidatePaths: [] };
+    const source = command.trim();
+    return { command: source, commandName: source.split(/\s+/)[0] ?? "", argv: source.split(/\s+/), redirects, candidatePaths: [] };
   }
 
   it("python3 -c counts ;-separated statements", () => {
-    expect(detectInlineScript(seg(`python3 -c "import os; os.system('a'); os.system('b'); os.system('c'); os.system('d')"`))).toEqual({
+    expect(detectInlineScript(seg(`  python3 -c "import os; os.system('a'); os.system('b'); os.system('c'); os.system('d')"  `))).toEqual({
       interpreter: "python -c",
       statementCount: 5,
     });
