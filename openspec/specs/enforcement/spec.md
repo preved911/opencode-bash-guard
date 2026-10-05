@@ -52,7 +52,7 @@ The system SHALL aggregate all segment actions. If ALL segments resolve to `allo
 
 ### Requirement: Enforcement via hook and permission event
 
-`tool.execute.before` SHALL wrap chains with a non-`no action` result in `{ ... ; }`. It SHALL store only decisions that change the native permission outcome. `permission.asked` SHALL consume a stored decision by sessionID and nested `tool.callID`, then reply through the SDK with `once` for allow or `reject` for deny. Exception: when the optional restructure feature is enabled, ask-resolving commands that exceed a configured readability threshold are rejected with readability guidance instead of being wrapped for the dialog (see the readability requirement).
+`tool.execute.before` SHALL leave fully allowed and `no action` chains unchanged, and SHALL wrap ask or deny chains in `{ ... ; }`. It SHALL store only decisions that change the native permission outcome. `permission.asked` SHALL consume a stored decision by sessionID and nested `tool.callID`, then reply through the SDK with `once` for allow or `reject` for deny. Exception: when the optional restructure feature is enabled, ask-resolving commands that exceed a configured readability threshold are rejected with readability guidance instead of being wrapped for the dialog (see the readability requirement).
 
 #### Scenario: No action — let through
 - **WHEN** chain action is `no action`

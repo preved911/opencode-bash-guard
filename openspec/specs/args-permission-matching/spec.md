@@ -12,7 +12,7 @@ The system SHALL read an optional `permissions` array from `opencode-bash-guard.
 
 Each matcher SHALL declare exactly one selector: `token: string | string[]`, `position: non-negative safe integer | "all"`, or `operand: "all"`. `position` and `operand` REQUIRE `pattern`. A single-string flag `token` MAY declare `pattern` to match its value. An array `token` MAY declare `flagValues: Record<string, string>` to add atomic path-scoped flag-value glob predicates. A **base-flag identity** starts with `-`, is neither `-` nor `--`, and contains neither whitespace nor `=`. Every `flags` key, `flagValues` key, scalar flag token, and dash-prefixed array element MUST be a base-flag identity; value-bearing spellings such as `--namespace=kube-system` are invalid in those positions. Every `flagValues` value MUST be a string glob. `flagValues` is invalid on any other matcher kind. A flag MUST NOT occur both as a presence predicate in the array and as a `flagValues` key, and duplicate presence predicates are invalid. Array elements containing `=` are invalid legacy value-bearing predicates and SHALL be dropped with scoped ask until explicitly migrated to `flagValues`. `pattern` with an array or a non-flag scalar token is invalid. The separator `--` is invalid as any matcher token or array element. Empty arrays, nested `args`, unknown entry or matcher fields, invalid actions, invalid base-flag identities, and `flags` values other than `0` or `1` are invalid.
 
-An omitted action SHALL normalize to `ask`; valid actions are `allow`, `ask`, and `deny`. Every invalid entry or matcher SHALL be dropped with a warning and SHALL force its identifiable executable to scoped `ask` with glob allows suspended. An invalid entry without a valid `tool`, a non-array `permissions` section, or another unscopable top-level schema failure SHALL trigger global degraded ask. When neither config source has a `permissions` section, the parsed rule list SHALL be empty and behavior SHALL remain unchanged. When the selected config file fails to parse as JSONC, the plugin SHALL enter global degraded ask before matcher evaluation: every segment resolves to `ask` except parse-error segments that already deny, and no native glob allow may bypass the failure.
+An omitted action SHALL normalize to `ask`; valid actions are `allow`, `ask`, and `deny`. Every invalid entry or matcher SHALL be dropped with a warning and SHALL force its identifiable executable to scoped `ask` with glob allows suspended. An invalid entry without a valid `tool`, a non-array `permissions` section, or another unscopable top-level schema failure SHALL trigger global degraded ask. When neither config source has a `permissions` section, the parsed rule list SHALL be empty and behavior SHALL remain unchanged. A missing config file (`ENOENT`) SHALL be treated as absent. When a selected config file fails to parse as JSONC or cannot be read for any other reason, the plugin SHALL warn with the file path and enter global degraded ask before matcher evaluation: every segment resolves to `ask` except parse-error segments that already deny, and no native glob allow may bypass the failure.
 
 #### Scenario: Valid entries parse
 
@@ -43,6 +43,11 @@ An omitted action SHALL normalize to `ask`; valid actions are `allow`, `ask`, an
 
 - **WHEN** `opencode-bash-guard.jsonc` contains a JSONC syntax error and native config has `"*": "ask"` as the fallback
 - **THEN** a warning names the parse error and every bash segment resolves to `ask`; the prompt persists until the config is fixed
+
+#### Scenario: Unreadable config file degrades to ask-everything
+
+- **WHEN** `opencode-bash-guard.jsonc` exists but reading it fails with an error other than `ENOENT`
+- **THEN** a warning names the file and every bash segment resolves to `ask`; only a genuinely missing file is ignored
 
 #### Scenario: Non-empty permissions require a same-source version marker
 
