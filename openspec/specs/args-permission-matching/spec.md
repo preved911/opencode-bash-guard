@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Match command segments against structured per-tool arg matchers declared in the plugin's own `opencode-bash-guard.jsonc` (`permissions` entries: token matchers with optional value globs and nested subcommand rules, positional slot matchers, and the variable-arity `position: "all"` form whose quantifier derives from the action). Matched rules resolve most-restrictive-wins ahead of the glob level; args-level allows override native asks; tokens are quote-aware argv-style; a broken config degrades to ask-everything so deny rules can never silently vanish.
+Match command segments against structured per-tool arg matchers declared in the plugin's own `opencode-bash-guard.jsonc` (`permissions` entries: token matchers with optional value globs and nested subcommand rules, positional slot matchers, and the variable-arity `position: "all"` form whose quantifier derives from the action). Matched rules resolve most-restrictive-wins ahead of the glob level; args-level allows override native asks; tokens are quote-aware argv-style; a broken config degrades to ask-everything so deny rules can never silently vanish. Stored args-level allow and deny decisions are delivered through `permission.asked` for the nested `tool.callID`.
 
 ## Requirements
 
@@ -390,7 +390,7 @@ For each segment, the bash action SHALL be resolved as: args-level action when a
 #### Scenario: Args allow overrides a broad native ask
 
 - **WHEN** `permissions` has `curl` → `{ "token": "-X", "pattern": "GET", "action": "allow" }`, native `permission.bash` has `"*": "ask"`, and segment is `curl -X GET https://api.com`
-- **THEN** the segment's action is `allow` from the args level, stored for the callID, and `permission.ask` sets `output.status = "allow"` — the command runs without a prompt
+- **THEN** the segment's action is `allow` from the args level, stored for the callID, and `permission.asked` replies `once` through the SDK — the command runs without a prompt
 
 #### Scenario: Args deny overrides a glob allow
 
@@ -419,7 +419,7 @@ For each segment, the bash action SHALL be resolved as: args-level action when a
 
 ### Requirement: Chain aggregation includes args-rule actions
 
-Args-level actions SHALL participate in existing segment resolution and most-restrictive-wins chain aggregation (deny > ask > allow) with no new aggregation rules. A chain whose aggregated action is `allow` and where at least one segment's allow came from an args rule SHALL store the `allow` decision and enforce it in `permission.ask`; chains whose allows come only from glob rules SHALL keep today's no-intervention behavior.
+Args-level actions SHALL participate in existing segment resolution and most-restrictive-wins chain aggregation (deny > ask > allow) with no new aggregation rules. A chain whose aggregated action is `allow` and where at least one segment's allow came from an args rule SHALL store the `allow` decision and reply `once` to `permission.asked`; chains whose allows come only from glob rules SHALL keep today's no-intervention behavior.
 
 #### Scenario: Mixed chain aggregates most restrictive
 
@@ -429,7 +429,7 @@ Args-level actions SHALL participate in existing segment resolution and most-res
 #### Scenario: All-allow args chain force-allows
 
 - **WHEN** chain is `curl -X GET https://a.com && curl -X GET https://b.com` and both segments match the args `allow` matcher while native matching would ask
-- **THEN** the chain action is `allow`, stored, and enforced as `allow` in `permission.ask`
+- **THEN** the chain action is `allow`, stored, and enforced through a `once` reply to `permission.asked`
 
 #### Scenario: One ask segment asks the chain
 
