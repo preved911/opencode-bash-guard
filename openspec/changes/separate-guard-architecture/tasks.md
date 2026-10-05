@@ -28,5 +28,5 @@
 ## 5. Regression Parity And Cleanup
 
 - [x] 5.1 Remove superseded cross-layer code only after characterization tests pass through the extracted architecture.
-- [ ] 5.2 Run the complete test suite and build after the lifecycle integration, then fix only refactor-introduced parity failures.
+- [x] 5.2 Run the complete test suite and build after the lifecycle integration, then fix only refactor-introduced parity failures.
 - [x] 5.3 Review public configuration and documentation-facing outputs to confirm no configuration, command policy, prompt-frequency, readability-threshold, or `permission.asked` behavior change was introduced.
