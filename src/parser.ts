@@ -1,377 +1,39 @@
 import { parse } from "unbash";
+import { traverseScript } from "./parser-traversal.js";
 import type {
-  Script,
-  Statement,
-  Node,
-  Word,
-  WordPart,
-  DoubleQuotedChild,
-  ArithmeticExpression,
-  Command,
-  Redirect,
-} from "unbash";
+  InlineScriptInfo,
+  LineSegmentInfo,
+  NormalizedInvocation,
+  ParsedCommand,
+  PerLineResult,
+} from "./parser-types.js";
 
-export interface RedirectInfo {
-  operator: string;
-  target: string;
-  fileDescriptor: number | undefined;
-  wellKnown: boolean;
-}
-
-/**
- * Parser-boundary output unit: one normalized invocation.
- * Carries everything policy and readability evaluation need, so neither
- * reparses shell text: prompt-visible command text, quote-aware argv,
- * redirects, and syntactically extracted candidate path operands.
- */
-export interface NormalizedInvocation {
-  /** Reconstructed command text (name + suffix + redirects), as shown in permission prompts. */
-  command: string;
-  /** First token, quote pairs stripped; empty when the command has no name. */
-  commandName: string;
-  /** Quote-aware argv: command name + suffix words with matched quote pairs stripped. */
-  argv: string[];
-  /** Command-level and statement-level redirects attached to this invocation. */
-  redirects: RedirectInfo[];
-  /**
-   * Syntactic candidate path operands: suffix words that do not start with `-`.
-   * Unresolved — path policy resolves them against the working directory.
-   */
-  candidatePaths: string[];
-}
-
-export interface ParsedCommand {
-  /** All invocations in evaluation order: top-level, then nested substitutions, then meta-command bodies. */
-  invocations: NormalizedInvocation[];
-  topLevelInvocations: NormalizedInvocation[];
-  parseError: boolean;
-  errors: string[];
-  /**
-   * Maximum command-context nesting depth: the top-level command body is depth 1;
-   * each `$()` / backtick substitution or meta-command (`eval`, `sh -c`, ...) string
-   * argument adds one level. 0 when nothing was parsed.
-   */
-  maxDepth: number;
-}
-
-export interface LineSegmentInfo {
-  lineNumber: number; // 1-based, matches the "line K" in rejection messages
-  segmentCount: number;
-}
-
-export interface PerLineResult {
-  lines: LineSegmentInfo[];
-  /** Most segments; first line wins on ties. Null when the command is empty. */
-  worstLine: LineSegmentInfo | null;
-}
-
-export interface InlineScriptInfo {
-  /** e.g. "python3 -c", "node -e", "python (heredoc)" — printed in rejection messages. */
-  interpreter: string;
-  statementCount: number;
-}
-
-const MAX_TRAVERSAL_DEPTH = 64;
-const MAX_TRAVERSED_INVOCATIONS = 1024;
-const TRAVERSAL_LIMIT_ERROR = "Shell command traversal exceeds the supported depth or invocation limit";
-
-function isWellKnownRedirect(redir: Redirect): boolean {
-  const target = redir.target?.text ?? redir.content ?? "";
-  if (target === "/dev/null") return true;
-  if (/^\d+$/.test(target)) return true;
-  if (redir.operator === "<<" || redir.operator === "<<-" || redir.operator === "<<<") return true;
-  return false;
-}
-
-function redirectToInfo(redir: Redirect): RedirectInfo {
-  return {
-    operator: redir.operator,
-    target: redir.target?.text ?? redir.content ?? "",
-    fileDescriptor: redir.fileDescriptor,
-    wellKnown: isWellKnownRedirect(redir),
-  };
-}
-
-function getCommandText(cmd: Command): string {
-  const parts: string[] = [];
-  if (cmd.name) {
-    parts.push(cmd.name.text);
-  }
-  for (const word of cmd.suffix) {
-    parts.push(word.text);
-  }
-  for (const redir of cmd.redirects) {
-    const prefix = redir.fileDescriptor !== undefined ? String(redir.fileDescriptor) : "";
-    const op = redir.operator;
-    const target = redir.target?.text ?? "";
-    parts.push(`${prefix}${op}${target}`);
-  }
-  return parts.join(" ");
-}
-
-function getCommandName(cmd: Command): string {
-  return cmd.name?.text ?? "";
-}
-
-function extractCommandsFromNode(node: Node): Command[] {
-  const result: Command[] = [];
-  const appendStatements = (statements: Statement[]): void => {
-    for (const statement of statements) result.push(...extractCommandsFromNode(statement.command));
-  };
-
-  switch (node.type) {
-    case "Command":
-      result.push(node);
-      break;
-    case "Pipeline":
-    case "AndOr":
-      for (const command of node.commands) result.push(...extractCommandsFromNode(command));
-      break;
-    case "If":
-      appendStatements(node.clause.commands);
-      appendStatements(node.then.commands);
-      if (node.else) result.push(...extractCommandsFromNode(node.else));
-      break;
-    case "For":
-    case "ArithmeticFor":
-    case "Select":
-    case "While":
-      appendStatements(node.body.commands);
-      break;
-    case "Function":
-    case "Coproc":
-      result.push(...extractCommandsFromNode(node.body));
-      break;
-    case "BraceGroup":
-    case "Subshell":
-      appendStatements(node.body.commands);
-      break;
-    case "CompoundList":
-      appendStatements(node.commands);
-      break;
-    case "Case":
-      for (const item of node.items) appendStatements(item.body.commands);
-      break;
-    case "Statement":
-      result.push(...extractCommandsFromNode(node.command));
-      break;
-  }
-  return result;
-}
-
-/** Strip matched quote pairs from an AST word: `"--force"` → `--force`, `--force""` → `--force`, `"a b"` stays one token `a b`. */
-export function stripQuotePairs(word: string): string {
-  let s = word;
-  let changed = true;
-  while (changed && s.length >= 2) {
-    changed = false;
-    const first = s[0];
-    const last = s[s.length - 1];
-    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
-      s = s.slice(1, -1);
-      changed = true;
-    } else if (s.includes('""')) {
-      s = s.replace('""', "");
-      changed = true;
-    }
-  }
-  return s;
-}
-
-export function extractArgv(cmd: Command): string[] {
-  const parts: string[] = [];
-  if (cmd.name?.text) parts.push(stripQuotePairs(cmd.name.text));
-  for (const word of cmd.suffix) parts.push(stripQuotePairs(word.text));
-  return parts;
-}
-
-function buildInvocation(cmd: Command, stmtRedirects: Redirect[]): NormalizedInvocation {
-  const cmdRedirects = (cmd.redirects ?? []).map(redirectToInfo);
-  const statementRedirects = (stmtRedirects ?? []).map(redirectToInfo);
-  return {
-    command: getCommandText(cmd),
-    commandName: getCommandName(cmd),
-    argv: extractArgv(cmd),
-    redirects: [...cmdRedirects, ...statementRedirects],
-    candidatePaths: cmd.suffix.filter((w) => !w.text.startsWith("-")).map((w) => w.text),
-  };
-}
-
-function extractInvocationsFromScript(script: Script): NormalizedInvocation[] {
-  const invocations: NormalizedInvocation[] = [];
-  for (const stmt of script.commands) {
-    const cmds = extractCommandsFromNode(stmt.command);
-    for (const cmd of cmds) {
-      if (cmd.type === "Command") {
-        invocations.push(buildInvocation(cmd, stmt.redirects));
-      }
-    }
-  }
-  return invocations;
-}
-
-interface TraversalState {
-  readonly invocations: NormalizedInvocation[];
-  readonly errors: string[];
-  exceeded: boolean;
-}
-
-function appendInvocations(state: TraversalState, invocations: NormalizedInvocation[]): boolean {
-  if (state.invocations.length + invocations.length > MAX_TRAVERSED_INVOCATIONS) {
-    if (!state.exceeded) state.errors.push(TRAVERSAL_LIMIT_ERROR);
-    state.exceeded = true;
-    return false;
-  }
-  state.invocations.push(...invocations);
-  return true;
-}
-
-function expansionScriptsFromPart(part: WordPart | DoubleQuotedChild): Script[] {
-  if (part.type === "CommandExpansion") return part.script ? [part.script] : [];
-  if (part.type === "ProcessSubstitution") return part.script ? [part.script] : [];
-  if (part.type === "DoubleQuoted" || part.type === "LocaleString") {
-    return part.parts.flatMap(expansionScriptsFromPart);
-  }
-  if (part.type === "ParameterExpansion") {
-    const words = [
-      part.operand,
-      part.slice?.offset,
-      part.slice?.length,
-      part.replace?.pattern,
-      part.replace?.replacement,
-    ].filter((word): word is Word => word !== undefined);
-    return words.flatMap(expansionScriptsFromWord);
-  }
-  if (part.type === "ArithmeticExpansion") return expansionScriptsFromArithmetic(part.expression);
-  return [];
-}
-
-function expansionScriptsFromArithmetic(expression: ArithmeticExpression | undefined): Script[] {
-  if (!expression) return [];
-  switch (expression.type) {
-    case "ArithmeticCommandExpansion":
-      return expression.script ? [expression.script] : [];
-    case "ArithmeticBinary":
-      return [...expansionScriptsFromArithmetic(expression.left), ...expansionScriptsFromArithmetic(expression.right)];
-    case "ArithmeticUnary":
-      return expansionScriptsFromArithmetic(expression.operand);
-    case "ArithmeticTernary":
-      return [
-        ...expansionScriptsFromArithmetic(expression.test),
-        ...expansionScriptsFromArithmetic(expression.consequent),
-        ...expansionScriptsFromArithmetic(expression.alternate),
-      ];
-    case "ArithmeticGroup":
-      return expansionScriptsFromArithmetic(expression.expression);
-    case "ArithmeticWord":
-      return [];
-  }
-}
-
-function expansionScriptsFromWord(word: Word): Script[] {
-  return (word.parts ?? []).flatMap(expansionScriptsFromPart);
-}
-
-function commandWords(command: Command): Word[] {
-  const prefixWords = command.prefix.flatMap((assignment) => [
-    ...(assignment.value ? [assignment.value] : []),
-    ...(assignment.array ?? []),
-  ]);
-  const redirectWords = command.redirects.flatMap((redirect) => [
-    ...(redirect.target ? [redirect.target] : []),
-    ...(redirect.body ? [redirect.body] : []),
-  ]);
-  return [command.name, ...prefixWords, ...command.suffix, ...redirectWords].filter(
-    (word): word is Word => word !== undefined,
-  );
-}
-
-function collectNestedInvocations(script: Script, depth: number, state: TraversalState): void {
-  if (state.exceeded) return;
-  if (depth > MAX_TRAVERSAL_DEPTH) {
-    state.errors.push(TRAVERSAL_LIMIT_ERROR);
-    state.exceeded = true;
-    return;
-  }
-
-  for (const statement of script.commands) {
-    for (const command of extractCommandsFromNode(statement.command)) {
-      if (state.exceeded) return;
-      const words = commandWords(command);
-      for (const nestedScript of words.flatMap(expansionScriptsFromWord)) {
-        const nestedInvocations = extractInvocationsFromScript(nestedScript);
-        if (!appendInvocations(state, nestedInvocations)) return;
-        collectNestedInvocations(nestedScript, depth + 1, state);
-      }
-
-      const metaArgs = parseMetaCommandArgs(getCommandText(command));
-      if (metaArgs) {
-        const metaResult = parse(metaArgs);
-        if (metaResult.errors && metaResult.errors.length > 0) {
-          state.errors.push(...metaResult.errors.map((error) => error.message));
-        }
-        const metaInvocations = extractInvocationsFromScript(metaResult);
-        if (!appendInvocations(state, metaInvocations)) return;
-        collectNestedInvocations(metaResult, depth + 1, state);
-      }
-    }
-  }
-}
-
-function stripOuterQuotes(s: string): string {
-  s = s.trim();
-  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
-    return s.slice(1, -1);
-  }
-  return s;
-}
-
-function parseMetaCommandArgs(command: string): string | null {
-  const trimmed = command.trim();
-  const evalMatch = trimmed.match(/^eval\s+(.+)$/);
-  if (evalMatch) return stripOuterQuotes(evalMatch[1]);
-
-  const shellCMatch = trimmed.match(/^(sh|bash|zsh|ksh)\s+-c\s+(["'])((?:(?!\2).)*)\2/);
-  if (shellCMatch) return shellCMatch[3];
-
-  return null;
-}
-
-function computeScriptMaxDepth(script: Script, depth: number): number {
-  if (depth > MAX_TRAVERSAL_DEPTH) return depth;
-  let max = depth;
-  for (const stmt of script.commands) {
-    for (const command of extractCommandsFromNode(stmt.command)) {
-      for (const nestedScript of commandWords(command).flatMap(expansionScriptsFromWord)) {
-        max = Math.max(max, computeScriptMaxDepth(nestedScript, depth + 1));
-      }
-      const metaArgs = parseMetaCommandArgs(getCommandText(command));
-      if (metaArgs) {
-        max = Math.max(max, computeScriptMaxDepth(parse(metaArgs), depth + 1));
-      }
-    }
-  }
-  return max;
-}
+export { extractArgv, stripQuotePairs } from "./parser-normalize.js";
+export type {
+  InlineScriptInfo,
+  LineSegmentInfo,
+  NormalizedInvocation,
+  NormalizedWordValue,
+  ParsedCommand,
+  PerLineResult,
+  RedirectInfo,
+} from "./parser-types.js";
 
 export function parseCommandPerLine(command: string): PerLineResult {
   const rawLines = command.split("\n");
   const lines: LineSegmentInfo[] = [];
-  for (let i = 0; i < rawLines.length; i++) {
-    const line = rawLines[i];
+  for (const [index, line] of rawLines.entries()) {
     if (line.trim().length === 0) continue;
-    lines.push({ lineNumber: i + 1, segmentCount: parseCommand(line).invocations.length });
+    lines.push({ lineNumber: index + 1, segmentCount: parseCommand(line).invocations.length });
   }
   let worstLine: LineSegmentInfo | null = null;
   for (const info of lines) {
-    if (!worstLine || info.segmentCount > worstLine.segmentCount) {
-      worstLine = info;
-    }
+    if (!worstLine || info.segmentCount > worstLine.segmentCount) worstLine = info;
   }
   return { lines, worstLine };
 }
 
-const INLINE_SCRIPT_PATTERNS: { pattern: RegExp; interpreter: string }[] = [
+const INLINE_SCRIPT_PATTERNS: readonly { readonly pattern: RegExp; readonly interpreter: string }[] = [
   { pattern: /^(?:python3?|python)\s+-c\s+/, interpreter: "python -c" },
   { pattern: /^perl\s+-e\s+/, interpreter: "perl -e" },
   { pattern: /^node\s+(?:-e|--eval)\s+/, interpreter: "node -e" },
@@ -381,9 +43,9 @@ const INLINE_SCRIPT_PATTERNS: { pattern: RegExp; interpreter: string }[] = [
 
 function stripQuotedScript(rest: string): string | null {
   const double = rest.match(/^"((?:[^"\\]|\\.)*)"/);
-  if (double) return double[1];
+  if (double) return double[1] ?? null;
   const single = rest.match(/^'([^']*)'/);
-  if (single) return single[1];
+  if (single) return single[1] ?? null;
   return null;
 }
 
@@ -408,11 +70,12 @@ export function detectInlineScript(invocation: NormalizedInvocation): InlineScri
   }
 
   if (HEREDOC_INTERPRETERS.has(invocation.commandName)) {
-    const heredoc = invocation.redirects.find((r) => r.operator === "<<" || r.operator === "<<-");
-    if (heredoc && heredoc.target.trim().length > 0) {
+    const heredoc = invocation.redirects.find((redirect) => redirect.operator === "<<" || redirect.operator === "<<-");
+    const body = heredoc?.heredocBody ?? heredoc?.target;
+    if (body && body.trim().length > 0) {
       return {
         interpreter: `${invocation.commandName} (heredoc)`,
-        statementCount: countScriptStatements(heredoc.target),
+        statementCount: countScriptStatements(body),
       };
     }
   }
@@ -425,30 +88,12 @@ export function parseCommand(command: string): ParsedCommand {
     return { invocations: [], topLevelInvocations: [], parseError: false, errors: [], maxDepth: 0 };
   }
 
-  const result = parse(command);
-  const errors: string[] = [];
-  let parseError = false;
-
-  if (result.errors && result.errors.length > 0) {
-    parseError = true;
-    for (const err of result.errors) {
-      errors.push(err.message);
-    }
-  }
-
-  const topLevelInvocations = extractInvocationsFromScript(result);
-  const invocations = [...topLevelInvocations];
-
-  const traversal: TraversalState = { invocations, errors, exceeded: false };
-  if (topLevelInvocations.length > MAX_TRAVERSED_INVOCATIONS) {
-    errors.push(TRAVERSAL_LIMIT_ERROR);
-    traversal.exceeded = true;
-  } else {
-    collectNestedInvocations(result, 1, traversal);
-  }
-  parseError = parseError || traversal.exceeded || errors.length > 0;
-
-  const maxDepth = computeScriptMaxDepth(result, 1);
-
-  return { invocations, topLevelInvocations, parseError, errors, maxDepth };
+  const traversal = traverseScript(parse(command), command);
+  return {
+    invocations: traversal.invocations,
+    topLevelInvocations: traversal.topLevelInvocations,
+    parseError: traversal.errors.length > 0,
+    errors: traversal.errors,
+    maxDepth: traversal.maxDepth,
+  };
 }
