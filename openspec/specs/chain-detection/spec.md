@@ -32,7 +32,7 @@ The system SHALL use `unbash` to parse the full command string into an AST. The 
 
 ### Requirement: Extract commands from command substitutions and backticks
 
-The system SHALL recursively walk the AST to find ALL commands, including those nested inside `$(...)` command substitutions and backtick `` `...` `` expressions. Each nested command SHALL be checked against bash permission patterns independently.
+The system SHALL recursively walk the AST to find ALL commands, including those nested inside `$(...)` command substitutions and backtick `` `...` `` expressions. Each nested command SHALL be checked against bash permission patterns independently. Traversal SHALL enforce finite depth and invocation budgets; exceeding either budget SHALL produce a parse error so enforcement fails closed.
 
 #### Scenario: Command in $() is extracted
 - **WHEN** the command is `cat $(find . -name "*.txt")`
@@ -53,6 +53,10 @@ The system SHALL recursively walk the AST to find ALL commands, including those 
 #### Scenario: Deeply nested substitution
 - **WHEN** the command is `echo $(cat $(find . -name "*.txt"))`
 - **THEN** the extracted commands SHALL include `echo`, `cat`, and `find`
+
+#### Scenario: Traversal budget exceeded
+- **WHEN** recursive substitutions or meta-command bodies exceed the supported traversal budget
+- **THEN** parsing SHALL report an error and the whole command SHALL resolve to `deny`
 
 ### Requirement: Recursively parse eval and shell -c arguments
 

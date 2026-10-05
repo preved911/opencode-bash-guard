@@ -30,3 +30,11 @@
 - [x] 5.1 Remove superseded cross-layer code only after characterization tests pass through the extracted architecture.
 - [x] 5.2 Run the complete test suite and build after the lifecycle integration, then fix only refactor-introduced parity failures.
 - [x] 5.3 Review public configuration and documentation-facing outputs to confirm no configuration, command policy, prompt-frequency, readability-threshold, or `permission.asked` behavior change was introduced.
+
+## 6. Review Hardening
+
+- [x] 6.1 Make command substitution, backtick, and meta-command traversal recursive with finite depth and invocation budgets that fail closed.
+- [x] 6.2 Resolve bare `~` and `~/...` against the current home while forcing `ask` for unsupported named-user tilde paths.
+- [x] 6.3 Ignore only missing plugin config files; warn and enter global degraded ask for every other read failure.
+- [x] 6.4 Align README, active specifications, and characterization labels with implemented behavior and adapter-level verification.
+- [ ] 6.5 Run the complete remote test and build workflow after review hardening.
