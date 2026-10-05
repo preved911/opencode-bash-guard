@@ -8,8 +8,8 @@ opencode's `permission.bash` matches glob patterns against the full command stri
 
 ## How it works
 
-1. **Chain Detection**: Parses the command with `unbash` AST into individual segments (including `$()` and backtick substitutions, `eval`, `sh -c`, etc.)
-2. **Path Extraction**: Treats non-flag AST operands as candidate paths, then resolves them for `external_directory` checks
+1. **Chain Detection**: Parses the command with `unbash` AST into individual segments and recursively visits executable substitutions in command, redirect, assignment, test, arithmetic, loop, and case fields. Static `eval` and supported shell `-c` bodies are reparsed.
+2. **Path Extraction**: Treats non-flag AST operands as candidate paths, decodes wholly static quoting, and forces review when shell expansion prevents a reliable path value
 3. **Config Reading**: Reads `permission.bash` and `external_directory` from the merged opencode config — supports flat strings and object patterns
 4. **Enforcement**: Most-restrictive-wins across segments — deny > ask > no action. Fully-allowed chains pass through untouched; allowed stays allowed
 5. **Permission Handoff**: Uses `permission.asked` to deliver stored allow and deny decisions for the nested `tool.callID`
@@ -208,12 +208,13 @@ All tests are in `src/__tests__/`. Run `npm run test:watch` during development.
 
 - **Flag-level tokenization heuristics**: tokens starting with `-` are never variable-arity candidates (negative numbers, files named `-myfile` are invisible to `position: "all"`); a dash-less flag value counts as a positional slot (`find -name x.txt` → `x.txt`, `git -c key=val` → `key=val`); matching is case-sensitive (`-X` ≠ `-x`); key=value options are full tokens (`dd if=/dev/sda` needs pattern `if=/dev/**`). For value-sensitive commands prefer `token` + `pattern` (value) matchers, which consume flag values explicitly.
 - **Exception carving requires a refinement lineage** — a more specific rule overrides a broader one only when its path extends the other's (or a value `pattern` narrows a bare token); incomparable overlapping rules still collapse to the strictest action.
-- **Broken plugin config degrades to ask-everything**: if `opencode-bash-guard.jsonc` fails to parse or cannot be read for a reason other than not existing, args rules are off and glob allows are suspended — every bash command asks until the file is fixed (a config failure can never silently re-allow a restricted command, but unattended/CI sessions will stall on prompts).
+- **Broken plugin config degrades to ask-everything**: if `opencode-bash-guard.jsonc` fails to parse, has a non-object root, or cannot be read for a reason other than not existing, args rules are off and glob allows are suspended — every bash command asks until the file is fixed (a config failure can never silently re-allow a restricted command, but unattended/CI sessions will stall on prompts).
 - **Config changes at runtime**: The `config` hook fires once at startup. Config changes require an opencode restart.
 - **Plugin config read once at startup**: `opencode-bash-guard.jsonc` is read once when the plugin initializes. Changes require an opencode restart.
 - **Heuristic inline-script statement counting**: Interpreter scripts are split on `;` and newlines. Strings containing semicolons can be miscounted; the heuristic errs toward rejecting unreadable blobs.
 - **No retry counter**: Repeated violations get the same rejection every time (no escalation). A compliant re-issue always exists (multi-line, one command per line).
-- **Path extraction is syntactic**: every non-flag suffix operand is treated as a candidate path. This can produce false positives for non-path operands; add more specific bash permission rules when needed.
+- **Path extraction is syntactic**: every non-flag suffix operand is treated as a candidate path. Static quotes are decoded before resolution; operands or redirect targets containing shell expansion require confirmation. This can produce false positives for non-path operands; add more specific bash permission rules when needed.
+- **Bounded AST traversal**: command-context depth, structural depth, visited AST values, and emitted invocations have independent limits. Crossing any limit denies the command rather than trusting a partial traversal.
 - **Performance**: AST parsing is heavier than string scanning, but only runs when chain operators (`&&`, `||`, `;`, `|`) are detected.
 - **unbash edge cases**: Complex shell syntax may cause partial parses. The plugin denies the entire command (fail closed) on any parse error — safer to miss a real command than let one through.
 - **Not a sandbox**: Focused on chain-splitting with path awareness, not comprehensive shell obfuscation detection. For full isolation, pair with a sandbox solution.
