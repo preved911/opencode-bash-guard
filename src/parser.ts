@@ -1,5 +1,15 @@
 import { parse } from "unbash";
-import type { Script, Statement, Node, CommandExpansionPart, Command, AndOr, Pipeline, Redirect } from "unbash";
+import type {
+  Script,
+  Statement,
+  Node,
+  Word,
+  WordPart,
+  DoubleQuotedChild,
+  ArithmeticExpression,
+  Command,
+  Redirect,
+} from "unbash";
 
 export interface RedirectInfo {
   operator: string;
@@ -61,6 +71,10 @@ export interface InlineScriptInfo {
   statementCount: number;
 }
 
+const MAX_TRAVERSAL_DEPTH = 64;
+const MAX_TRAVERSED_INVOCATIONS = 1024;
+const TRAVERSAL_LIMIT_ERROR = "Shell command traversal exceeds the supported depth or invocation limit";
+
 function isWellKnownRedirect(redir: Redirect): boolean {
   const target = redir.target?.text ?? redir.content ?? "";
   if (target === "/dev/null") return true;
@@ -101,23 +115,46 @@ function getCommandName(cmd: Command): string {
 
 function extractCommandsFromNode(node: Node): Command[] {
   const result: Command[] = [];
-  if (node.type === "Command") {
-    result.push(node);
-  } else if (node.type === "Pipeline") {
-    for (const cmd of (node as Pipeline).commands) {
-      result.push(...extractCommandsFromNode(cmd));
-    }
-  } else if (node.type === "AndOr") {
-    for (const cmd of (node as AndOr).commands) {
-      result.push(...extractCommandsFromNode(cmd));
-    }
-  } else if (node.type === "BraceGroup" || node.type === "Subshell") {
-    const body = (node as any).body;
-    if (body && body.commands) {
-      for (const stmt of body.commands as Statement[]) {
-        result.push(...extractCommandsFromNode(stmt.command));
-      }
-    }
+  const appendStatements = (statements: Statement[]): void => {
+    for (const statement of statements) result.push(...extractCommandsFromNode(statement.command));
+  };
+
+  switch (node.type) {
+    case "Command":
+      result.push(node);
+      break;
+    case "Pipeline":
+    case "AndOr":
+      for (const command of node.commands) result.push(...extractCommandsFromNode(command));
+      break;
+    case "If":
+      appendStatements(node.clause.commands);
+      appendStatements(node.then.commands);
+      if (node.else) result.push(...extractCommandsFromNode(node.else));
+      break;
+    case "For":
+    case "ArithmeticFor":
+    case "Select":
+    case "While":
+      appendStatements(node.body.commands);
+      break;
+    case "Function":
+    case "Coproc":
+      result.push(...extractCommandsFromNode(node.body));
+      break;
+    case "BraceGroup":
+    case "Subshell":
+      appendStatements(node.body.commands);
+      break;
+    case "CompoundList":
+      appendStatements(node.commands);
+      break;
+    case "Case":
+      for (const item of node.items) appendStatements(item.body.commands);
+      break;
+    case "Statement":
+      result.push(...extractCommandsFromNode(node.command));
+      break;
   }
   return result;
 }
@@ -173,38 +210,112 @@ function extractInvocationsFromScript(script: Script): NormalizedInvocation[] {
   return invocations;
 }
 
-function extractNestedInvocations(script: Script): NormalizedInvocation[] {
-  const nested: NormalizedInvocation[] = [];
-  function walkNode(node: Node): void {
-    if (node.type === "Command") {
-      for (const word of (node as Command).suffix) {
-        if (word.parts) {
-          for (const part of word.parts) {
-            if (part.type === "CommandExpansion") {
-              const ce = part as CommandExpansionPart;
-              if (ce.script) {
-                for (const inv of extractInvocationsFromScript(ce.script)) {
-                  nested.push(inv);
-                }
-              }
-            }
-          }
+interface TraversalState {
+  readonly invocations: NormalizedInvocation[];
+  readonly errors: string[];
+  exceeded: boolean;
+}
+
+function appendInvocations(state: TraversalState, invocations: NormalizedInvocation[]): boolean {
+  if (state.invocations.length + invocations.length > MAX_TRAVERSED_INVOCATIONS) {
+    if (!state.exceeded) state.errors.push(TRAVERSAL_LIMIT_ERROR);
+    state.exceeded = true;
+    return false;
+  }
+  state.invocations.push(...invocations);
+  return true;
+}
+
+function expansionScriptsFromPart(part: WordPart | DoubleQuotedChild): Script[] {
+  if (part.type === "CommandExpansion") return part.script ? [part.script] : [];
+  if (part.type === "ProcessSubstitution") return part.script ? [part.script] : [];
+  if (part.type === "DoubleQuoted" || part.type === "LocaleString") {
+    return part.parts.flatMap(expansionScriptsFromPart);
+  }
+  if (part.type === "ParameterExpansion") {
+    const words = [
+      part.operand,
+      part.slice?.offset,
+      part.slice?.length,
+      part.replace?.pattern,
+      part.replace?.replacement,
+    ].filter((word): word is Word => word !== undefined);
+    return words.flatMap(expansionScriptsFromWord);
+  }
+  if (part.type === "ArithmeticExpansion") return expansionScriptsFromArithmetic(part.expression);
+  return [];
+}
+
+function expansionScriptsFromArithmetic(expression: ArithmeticExpression | undefined): Script[] {
+  if (!expression) return [];
+  switch (expression.type) {
+    case "ArithmeticCommandExpansion":
+      return expression.script ? [expression.script] : [];
+    case "ArithmeticBinary":
+      return [...expansionScriptsFromArithmetic(expression.left), ...expansionScriptsFromArithmetic(expression.right)];
+    case "ArithmeticUnary":
+      return expansionScriptsFromArithmetic(expression.operand);
+    case "ArithmeticTernary":
+      return [
+        ...expansionScriptsFromArithmetic(expression.test),
+        ...expansionScriptsFromArithmetic(expression.consequent),
+        ...expansionScriptsFromArithmetic(expression.alternate),
+      ];
+    case "ArithmeticGroup":
+      return expansionScriptsFromArithmetic(expression.expression);
+    case "ArithmeticWord":
+      return [];
+  }
+}
+
+function expansionScriptsFromWord(word: Word): Script[] {
+  return (word.parts ?? []).flatMap(expansionScriptsFromPart);
+}
+
+function commandWords(command: Command): Word[] {
+  const prefixWords = command.prefix.flatMap((assignment) => [
+    ...(assignment.value ? [assignment.value] : []),
+    ...(assignment.array ?? []),
+  ]);
+  const redirectWords = command.redirects.flatMap((redirect) => [
+    ...(redirect.target ? [redirect.target] : []),
+    ...(redirect.body ? [redirect.body] : []),
+  ]);
+  return [command.name, ...prefixWords, ...command.suffix, ...redirectWords].filter(
+    (word): word is Word => word !== undefined,
+  );
+}
+
+function collectNestedInvocations(script: Script, depth: number, state: TraversalState): void {
+  if (state.exceeded) return;
+  if (depth > MAX_TRAVERSAL_DEPTH) {
+    state.errors.push(TRAVERSAL_LIMIT_ERROR);
+    state.exceeded = true;
+    return;
+  }
+
+  for (const statement of script.commands) {
+    for (const command of extractCommandsFromNode(statement.command)) {
+      if (state.exceeded) return;
+      const words = commandWords(command);
+      for (const nestedScript of words.flatMap(expansionScriptsFromWord)) {
+        const nestedInvocations = extractInvocationsFromScript(nestedScript);
+        if (!appendInvocations(state, nestedInvocations)) return;
+        collectNestedInvocations(nestedScript, depth + 1, state);
+      }
+
+      const metaArgs = parseMetaCommandArgs(getCommandText(command));
+      if (metaArgs) {
+        const metaResult = parse(metaArgs);
+        if (metaResult.errors && metaResult.errors.length > 0) {
+          state.errors.push(...metaResult.errors.map((error) => error.message));
         }
-      }
-    } else if (node.type === "Pipeline") {
-      for (const cmd of (node as Pipeline).commands) {
-        walkNode(cmd);
-      }
-    } else if (node.type === "AndOr") {
-      for (const cmd of (node as AndOr).commands) {
-        walkNode(cmd);
+        const metaInvocations = extractInvocationsFromScript(metaResult);
+        if (!appendInvocations(state, metaInvocations)) return;
+        collectNestedInvocations(metaResult, depth + 1, state);
       }
     }
   }
-  for (const stmt of script.commands) {
-    walkNode(stmt.command);
-  }
-  return nested;
 }
 
 function stripOuterQuotes(s: string): string {
@@ -227,42 +338,16 @@ function parseMetaCommandArgs(command: string): string | null {
 }
 
 function computeScriptMaxDepth(script: Script, depth: number): number {
+  if (depth > MAX_TRAVERSAL_DEPTH) return depth;
   let max = depth;
   for (const stmt of script.commands) {
-    max = Math.max(max, computeNodeMaxDepth(stmt.command, depth));
-  }
-  return max;
-}
-
-function computeNodeMaxDepth(node: Node, depth: number): number {
-  let max = depth;
-  if (node.type === "Command") {
-    const cmd = node as Command;
-    for (const word of cmd.suffix) {
-      if (!word.parts) continue;
-      for (const part of word.parts) {
-        if (part.type === "CommandExpansion") {
-          const ce = part as CommandExpansionPart;
-          if (ce.script) {
-            max = Math.max(max, computeScriptMaxDepth(ce.script, depth + 1));
-          }
-        }
+    for (const command of extractCommandsFromNode(stmt.command)) {
+      for (const nestedScript of commandWords(command).flatMap(expansionScriptsFromWord)) {
+        max = Math.max(max, computeScriptMaxDepth(nestedScript, depth + 1));
       }
-    }
-    const metaArgs = parseMetaCommandArgs(getCommandText(cmd));
-    if (metaArgs) {
-      max = Math.max(max, computeScriptMaxDepth(parse(metaArgs), depth + 1));
-    }
-  } else if (node.type === "Pipeline" || node.type === "AndOr") {
-    const group = node as Pipeline | AndOr;
-    for (const cmd of group.commands) {
-      max = Math.max(max, computeNodeMaxDepth(cmd, depth));
-    }
-  } else if (node.type === "BraceGroup" || node.type === "Subshell") {
-    const body = (node as { body?: { commands?: Statement[] } }).body;
-    if (body?.commands) {
-      for (const stmt of body.commands) {
-        max = Math.max(max, computeNodeMaxDepth(stmt.command, depth));
+      const metaArgs = parseMetaCommandArgs(getCommandText(command));
+      if (metaArgs) {
+        max = Math.max(max, computeScriptMaxDepth(parse(metaArgs), depth + 1));
       }
     }
   }
@@ -354,25 +439,14 @@ export function parseCommand(command: string): ParsedCommand {
   const topLevelInvocations = extractInvocationsFromScript(result);
   const invocations = [...topLevelInvocations];
 
-  const nestedCmds = extractNestedInvocations(result);
-  invocations.push(...nestedCmds);
-
-  for (const inv of invocations) {
-    const metaArgs = parseMetaCommandArgs(inv.command);
-    if (metaArgs) {
-      const metaResult = parse(metaArgs);
-      if (metaResult.errors && metaResult.errors.length > 0) {
-        parseError = true;
-        for (const err of metaResult.errors) {
-          errors.push(err.message);
-        }
-      }
-      const metaInvocations = extractInvocationsFromScript(metaResult);
-      for (const ms of metaInvocations) {
-        invocations.push(ms);
-      }
-    }
+  const traversal: TraversalState = { invocations, errors, exceeded: false };
+  if (topLevelInvocations.length > MAX_TRAVERSED_INVOCATIONS) {
+    errors.push(TRAVERSAL_LIMIT_ERROR);
+    traversal.exceeded = true;
+  } else {
+    collectNestedInvocations(result, 1, traversal);
   }
+  parseError = parseError || traversal.exceeded || errors.length > 0;
 
   const maxDepth = computeScriptMaxDepth(result, 1);
 

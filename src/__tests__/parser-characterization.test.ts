@@ -166,6 +166,49 @@ describe("characterization: substitutions and meta-command bodies", () => {
     expect(result.invocations.filter((s) => s.commandName === "ls")).toHaveLength(2);
   });
 
+  it("recursively extracts substitutions nested inside quoted substitutions", () => {
+    const result = parseChain('git status "$(git status "$(touch /tmp/obg-bypass)")"');
+    expect(result.invocations.map((segment) => segment.commandName)).toEqual(["git", "git", "touch"]);
+    expect(result.parseError).toBe(false);
+  });
+
+  it("recursively extracts substitutions inside a meta-command body", () => {
+    const result = parseChain(`bash -c 'git status "$(touch /tmp/obg-bypass)"'`);
+    expect(result.invocations.map((segment) => segment.commandName)).toEqual(["bash", "git", "touch"]);
+    expect(result.parseError).toBe(false);
+  });
+
+  it("recursively extracts mixed dollar and backtick substitutions", () => {
+    const result = parseChain('echo "$(echo `touch /tmp/obg-bypass`)"');
+    expect(result.invocations.map((segment) => segment.commandName)).toEqual(["echo", "echo", "touch"]);
+    expect(result.parseError).toBe(false);
+  });
+
+  it("recursively extracts nested eval bodies", () => {
+    const result = parseChain(`eval 'eval "touch /tmp/obg-bypass"'`);
+    expect(result.invocations.map((segment) => segment.commandName)).toEqual(["eval", "eval", "touch"]);
+    expect(result.parseError).toBe(false);
+  });
+
+  it("recursively extracts nested shell -c bodies", () => {
+    const result = parseChain(`bash -c 'sh -c "touch /tmp/obg-bypass"'`);
+    expect(result.invocations.map((segment) => segment.commandName)).toEqual(["bash", "sh", "touch"]);
+    expect(result.parseError).toBe(false);
+  });
+
+  it("fails closed when nested traversal exceeds its depth limit", () => {
+    const command = `${"echo $(".repeat(65)}touch /tmp/obg-bypass${")".repeat(65)}`;
+    const result = parseChain(command);
+    expect(result.parseError).toBe(true);
+    expect(result.errors).toContain("Shell command traversal exceeds the supported depth or invocation limit");
+  });
+
+  it("fails closed when traversal exceeds its invocation limit", () => {
+    const result = parseChain(Array.from({ length: 1025 }, () => "echo ok").join("; "));
+    expect(result.parseError).toBe(true);
+    expect(result.errors).toContain("Shell command traversal exceeds the supported depth or invocation limit");
+  });
+
   it("eval body commands are extracted", () => {
     const result = parseChain('eval "rm -rf /"');
     expect(result.invocations.map((s) => s.commandName)).toContain("eval");
