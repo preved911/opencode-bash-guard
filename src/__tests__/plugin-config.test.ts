@@ -111,6 +111,41 @@ describe("parsePluginConfig", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("project.jsonc"));
   });
 
+  it("array root → global degraded ask", () => {
+    const result = parsePluginConfig([file("global.jsonc", "[]")]);
+
+    expect(result).toEqual({
+      restructure: DEFAULT_RESTRUCTURE_CONFIG,
+      toolPermissions: [],
+      forcedAskTools: [],
+      degraded: true,
+    });
+  });
+
+  it("higher-precedence array root → global degraded ask despite a valid lower-precedence object", () => {
+    const globalFile = file("global.jsonc", '{"restructure": { "enabled": true, "max_segments": 5 }}');
+    const projectFile = file("project.jsonc", "[]");
+
+    const result = parsePluginConfig([globalFile, projectFile]);
+
+    expect(result).toEqual({
+      restructure: DEFAULT_RESTRUCTURE_CONFIG,
+      toolPermissions: [],
+      forcedAskTools: [],
+      degraded: true,
+    });
+  });
+
+  it.each(["null", '"invalid"', "42", "true"])("scalar root %s → global degraded ask", (content) => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(parsePluginConfig([file("global.jsonc", content)])).toEqual({
+      restructure: DEFAULT_RESTRUCTURE_CONFIG,
+      toolPermissions: [],
+      forcedAskTools: [],
+      degraded: true,
+    });
+  });
+
   it("invalid thresholds → warning + defaults apply", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const content = '{"restructure": { "enabled": true, "max_segments": 0, "max_depth": "many" }}';

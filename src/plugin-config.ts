@@ -143,14 +143,14 @@ export function parsePluginConfig(files: PluginConfigFile[]): PluginFileConfig {
     }
     const errors: ParseError[] = [];
     const parsed = parseJsonc(file.content, errors, { allowTrailingComma: true });
-    if (errors.length > 0 || parsed === undefined || parsed === null || typeof parsed !== "object") {
+    if (errors.length > 0 || !isPlainObject(parsed)) {
       console.warn(
         `[opencode-bash-guard] Invalid JSONC in ${file.path} — degraded mode: every bash command will ask until the file is fixed.`,
       );
       allValid = false;
       continue;
     }
-    const parsedObject = parsed as Record<string, unknown>;
+    const parsedObject = parsed;
     if (parsedObject.permissions !== undefined) permissionsSource = index;
     if (parsedObject.matcherVersion !== undefined) markerSource = index;
     merged = deepMerge(merged, parsedObject);
