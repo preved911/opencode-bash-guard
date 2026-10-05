@@ -265,6 +265,19 @@ describe("characterization: segment resolution (glob fallback + paths + redirect
     expect(allowFromArgsRule).toBe(false);
   });
 
+  it("external-directory deny overrides a matching args allow for static absolute paths", () => {
+    const config: PluginConfig = {
+      ...defaultConfig,
+      bashRules: [{ pattern: "*", action: "allow" }],
+      externalDirectoryRules: [],
+      externalDirectoryDefault: "deny",
+      toolPermissions: [{ tool: "cat", args: [{ position: 0, pattern: "**", action: "allow" }] }],
+    };
+    const { action, allowFromArgsRule } = resolveSegment(inv('cat "/etc/passwd"'), "/project", config);
+    expect(action).toBe("deny");
+    expect(allowFromArgsRule).toBe(false);
+  });
+
   it("dynamic operands force ask over glob and args allow", () => {
     const config: PluginConfig = {
       ...defaultConfig,

@@ -73,16 +73,6 @@ export function resolveSegment(invocation: NormalizedInvocation, cwd: string, co
   const requiresPathConfirmation = [...paths, ...redirectTargets].some((candidate) => candidate.requiresConfirmation);
   const redirectAction = resolveRedirectTargets(redirectTargets, cwd, config);
 
-  // Pipeline order (spec): args rules decide the segment after redirect safety checks; otherwise the legacy glob evaluation.
-  const argsAction = matchToolPermissions(tokens, config.toolPermissions);
-  if (argsAction !== null) {
-    const confirmedAction = requiresPathConfirmation ? combineActions(argsAction, "ask") : argsAction;
-    const action = combineActions(confirmedAction, redirectAction);
-    return { action, allowFromArgsRule: action === "allow" && argsAction === "allow" };
-  }
-
-  const bashAction = matchBashPermission(invocation.command, config.bashRules);
-
   let edAction: "ask" | "allow" | "deny" | null = requiresPathConfirmation ? "ask" : null;
 
   for (const p of paths) {
@@ -94,6 +84,15 @@ export function resolveSegment(invocation: NormalizedInvocation, cwd: string, co
       }
     }
   }
+
+  // Pipeline order (spec): args rules decide the segment after path and redirect safety checks; otherwise the legacy glob evaluation.
+  const argsAction = matchToolPermissions(tokens, config.toolPermissions);
+  if (argsAction !== null) {
+    const action = combineActions(combineActions(argsAction, edAction), redirectAction);
+    return { action, allowFromArgsRule: action === "allow" && argsAction === "allow" };
+  }
+
+  const bashAction = matchBashPermission(invocation.command, config.bashRules);
 
   let combined = combineActions(bashAction, edAction);
 
