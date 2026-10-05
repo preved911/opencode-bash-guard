@@ -16,8 +16,9 @@ import type { NormalizedInvocation } from "../parser.js";
 const argvOf = (command: string): string[] => parseChain(command).invocations[0]?.argv ?? command.split(/\s+/);
 
 function seg(command: string, redirects: NormalizedInvocation["redirects"] = []): NormalizedInvocation {
-  const parsed = parseChain(command).invocations[0];
-  if (!parsed) throw new Error(`unparseable fixture: ${command}`);
+  const source = command.trim();
+  const parsed = parseChain(source).invocations[0];
+  if (!parsed) throw new Error(`unparseable fixture: ${source}`);
   return redirects.length > 0 ? { ...parsed, redirects } : parsed;
 }
 
@@ -151,7 +152,7 @@ describe("characterization: args matcher semantics", () => {
     const entry = [{ tool: "find", args: [{ position: 0, pattern: "/tmp/**", action: "ask" as const }] }];
     expect(matchToolPermissions(argvOf("find -- /tmp/logs"), entry)).toBe("ask");
     const pathEntry = [{ tool: "git", args: [{ token: ["push"], action: "deny" as const }] }];
-    expect(matchToolPermissions(argvOf("git -- push"), entry)).toBeNull();
+    expect(matchToolPermissions(argvOf("git -- push"), pathEntry)).toBeNull();
   });
 
   it("= form: inline value counts as a flag value atom", () => {
