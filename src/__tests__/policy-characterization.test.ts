@@ -247,9 +247,31 @@ describe("characterization: segment resolution (glob fallback + paths + redirect
     const config: PluginConfig = {
       ...defaultConfig,
       bashRules: [{ pattern: "*", action: "allow" }],
-      toolPermissions: [{ tool: "cat", args: [{ position: 0, pattern: "*", action: "allow" }] }],
+      toolPermissions: [{ tool: "cat", args: [{ position: 0, pattern: "**", action: "allow" }] }],
     };
     const { action, allowFromArgsRule } = resolveSegment(inv("cat ~other/.ssh/config"), "/project", config);
+    expect(action).toBe("ask");
+    expect(allowFromArgsRule).toBe(false);
+  });
+
+  it("quoted absolute operands still enforce external-directory policy", () => {
+    const config: PluginConfig = {
+      ...defaultConfig,
+      bashRules: [{ pattern: "*", action: "allow" }],
+      toolPermissions: [{ tool: "cat", args: [{ position: 0, pattern: "**", action: "allow" }] }],
+    };
+    const { action, allowFromArgsRule } = resolveSegment(inv('cat "/etc/passwd"'), "/project", config);
+    expect(action).toBe("ask");
+    expect(allowFromArgsRule).toBe(false);
+  });
+
+  it("dynamic operands force ask over glob and args allow", () => {
+    const config: PluginConfig = {
+      ...defaultConfig,
+      bashRules: [{ pattern: "*", action: "allow" }],
+      toolPermissions: [{ tool: "cat", args: [{ position: 0, pattern: "**", action: "allow" }] }],
+    };
+    const { action, allowFromArgsRule } = resolveSegment(inv('cat "$TARGET"'), "/project", config);
     expect(action).toBe("ask");
     expect(allowFromArgsRule).toBe(false);
   });
@@ -297,6 +319,67 @@ describe("characterization: segment resolution (glob fallback + paths + redirect
       { operator: ">", target: "/etc/passwd", fileDescriptor: undefined, wellKnown: false },
     ]), "/project", config);
     expect(action).toBe("deny");
+  });
+
+  it.each(["~", "~/.ssh/id_rsa"])("home redirect %s is external and overrides glob and args allow with ask", (target) => {
+    const config: PluginConfig = {
+      bashRules: [{ pattern: "*", action: "allow" }],
+      editRules: [],
+      externalDirectoryRules: [{ pattern: "./**", action: "allow" }],
+      externalDirectoryDefault: "ask",
+      toolPermissions: [{ tool: "git", args: [{ token: ["stripspace"], action: "allow" }] }],
+      enabled: true,
+    };
+    const { action } = resolveSegment(inv("git stripspace", [
+      { operator: "<", target, fileDescriptor: undefined, wellKnown: false },
+    ]), "/project", config);
+    expect(action).toBe("ask");
+  });
+
+  it("unresolved named-user redirect forces ask before a matching args allow", () => {
+    const config: PluginConfig = {
+      bashRules: [{ pattern: "*", action: "allow" }],
+      editRules: [],
+      externalDirectoryRules: [{ pattern: "./**", action: "allow" }],
+      externalDirectoryDefault: null,
+      toolPermissions: [{ tool: "git", args: [{ token: ["stripspace"], action: "allow" }] }],
+      enabled: true,
+    };
+    const { action, allowFromArgsRule } = resolveSegment(inv("git stripspace", [
+      { operator: "<", target: "~other", fileDescriptor: undefined, wellKnown: false },
+    ]), "/project", config);
+    expect(action).toBe("ask");
+    expect(allowFromArgsRule).toBe(false);
+  });
+
+  it("dynamic redirect targets force ask before a matching args allow", () => {
+    const config: PluginConfig = {
+      bashRules: [{ pattern: "*", action: "allow" }],
+      editRules: [],
+      externalDirectoryRules: [{ pattern: "./**", action: "allow" }],
+      externalDirectoryDefault: null,
+      toolPermissions: [{ tool: "git", args: [{ token: ["stripspace"], action: "allow" }] }],
+      enabled: true,
+    };
+    const { action, allowFromArgsRule } = resolveSegment(inv('git stripspace > "$OUTPUT"'), "/project", config);
+    expect(action).toBe("ask");
+    expect(allowFromArgsRule).toBe(false);
+  });
+
+  it("redirect deny remains more restrictive than a matching args allow", () => {
+    const config: PluginConfig = {
+      bashRules: [{ pattern: "*", action: "allow" }],
+      editRules: [{ pattern: "*", action: "deny" }],
+      externalDirectoryRules: [],
+      externalDirectoryDefault: null,
+      toolPermissions: [{ tool: "git", args: [{ token: ["stripspace"], action: "allow" }] }],
+      enabled: true,
+    };
+    const { action, allowFromArgsRule } = resolveSegment(inv("git stripspace", [
+      { operator: "<", target: "~other", fileDescriptor: undefined, wellKnown: false },
+    ]), "/project", config);
+    expect(action).toBe("deny");
+    expect(allowFromArgsRule).toBe(false);
   });
 
   it("forcedAskTools overrides everything for that executable", () => {

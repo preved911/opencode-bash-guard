@@ -14,11 +14,22 @@ export interface ExtractedPath {
  * boundary); this module only resolves them — no shell reparsing.
  */
 export function resolveCandidatePaths(invocation: NormalizedInvocation, cwd: string): ExtractedPath[] {
-  return invocation.candidatePaths.map((p) => ({
-    original: p,
-    resolved: resolvePath(p, cwd),
-    requiresConfirmation: /^~[^/]/.test(p),
-  }));
+  if (invocation.candidatePathDetails) {
+    return invocation.candidatePathDetails.map((candidate) =>
+      candidate.value === null
+        ? { original: candidate.raw, resolved: candidate.raw, requiresConfirmation: true }
+        : classifyPath(candidate.value, cwd),
+    );
+  }
+  return invocation.candidatePaths.map((candidate) => classifyPath(candidate, cwd));
+}
+
+export function classifyPath(candidate: string, cwd: string): ExtractedPath {
+  return {
+    original: candidate,
+    resolved: resolvePath(candidate, cwd),
+    requiresConfirmation: /^~[^/]/.test(candidate),
+  };
 }
 
 export function resolvePath(p: string, cwd: string): string {

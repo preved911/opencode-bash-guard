@@ -1,7 +1,7 @@
 import type { PluginConfig } from "./config.js";
 import { matchBashPermission, matchExternalDirectory, matchToolPermissions } from "./config.js";
-import type { NormalizedInvocation, RedirectInfo } from "./parser.js";
-import { resolveCandidatePaths } from "./paths.js";
+import type { NormalizedInvocation } from "./parser.js";
+import { classifyPath, resolveCandidatePaths, type ExtractedPath } from "./paths.js";
 import path from "path";
 
 /**
@@ -14,13 +14,11 @@ import path from "path";
 
 export type ChainAction = "allow" | "ask" | "deny" | null;
 
-function resolveRedirectTargets(redirects: RedirectInfo[], cwd: string, config: PluginConfig): ChainAction {
+function resolveRedirectTargets(targets: ExtractedPath[], cwd: string, config: PluginConfig): ChainAction {
   const actions: ChainAction[] = [];
 
-  for (const redir of redirects) {
-    if (redir.wellKnown) continue;
-
-    const resolvedPath = path.resolve(cwd, redir.target);
+  for (const target of targets) {
+    const resolvedPath = target.resolved;
     const underCwd = resolvedPath.startsWith(cwd + path.sep) || resolvedPath === cwd;
 
     const editAction = matchBashPermission(resolvedPath, config.editRules);
@@ -65,15 +63,22 @@ export function resolveSegment(invocation: NormalizedInvocation, cwd: string, co
   }
 
   const paths = resolveCandidatePaths(invocation, cwd);
-  const requiresPathConfirmation = paths.some((candidate) => candidate.requiresConfirmation);
+  const redirectTargets = invocation.redirects
+    .filter((redirect) => !redirect.wellKnown)
+    .map((redirect) =>
+      "targetValue" in redirect && redirect.targetValue === null
+        ? { original: redirect.rawTarget ?? redirect.target, resolved: redirect.rawTarget ?? redirect.target, requiresConfirmation: true }
+        : classifyPath(redirect.targetValue ?? redirect.target, cwd),
+    );
+  const requiresPathConfirmation = [...paths, ...redirectTargets].some((candidate) => candidate.requiresConfirmation);
+  const redirectAction = resolveRedirectTargets(redirectTargets, cwd, config);
 
-  // Pipeline order (spec): args rules decide the segment when any matcher matched; otherwise the legacy glob evaluation.
+  // Pipeline order (spec): args rules decide the segment after redirect safety checks; otherwise the legacy glob evaluation.
   const argsAction = matchToolPermissions(tokens, config.toolPermissions);
   if (argsAction !== null) {
-    if (requiresPathConfirmation && argsAction !== "deny") {
-      return { action: "ask", allowFromArgsRule: false };
-    }
-    return { action: argsAction, allowFromArgsRule: argsAction === "allow" };
+    const confirmedAction = requiresPathConfirmation ? combineActions(argsAction, "ask") : argsAction;
+    const action = combineActions(confirmedAction, redirectAction);
+    return { action, allowFromArgsRule: action === "allow" && argsAction === "allow" };
   }
 
   const bashAction = matchBashPermission(invocation.command, config.bashRules);
@@ -92,10 +97,7 @@ export function resolveSegment(invocation: NormalizedInvocation, cwd: string, co
 
   let combined = combineActions(bashAction, edAction);
 
-  if (invocation.redirects.length > 0) {
-    const redirectAction = resolveRedirectTargets(invocation.redirects, cwd, config);
-    combined = combineActions(combined, redirectAction);
-  }
+  combined = combineActions(combined, redirectAction);
 
   return { action: combined, allowFromArgsRule: false };
 }

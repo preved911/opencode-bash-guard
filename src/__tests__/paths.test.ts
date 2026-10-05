@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import os from "os";
 import path from "path";
-import { resolveCandidatePaths, resolvePath } from "../paths.js";
+import { classifyPath, resolveCandidatePaths, resolvePath } from "../paths.js";
 import { parseCommand as parseChain } from "../parser.js";
 import type { NormalizedInvocation } from "../parser.js";
 
@@ -53,6 +53,22 @@ describe("resolveCandidatePaths", () => {
     expect(etcPath).toBeDefined();
     expect(etcPath!.resolved).toBe("/etc/hosts");
   });
+
+  it("resolves quote-decoded absolute paths outside cwd", () => {
+    expect(resolveCandidatePaths(invocationOf('cat "/etc/passwd"'), "/project")).toContainEqual({
+      original: "/etc/passwd",
+      resolved: "/etc/passwd",
+      requiresConfirmation: false,
+    });
+  });
+
+  it("requires confirmation for dynamic path operands", () => {
+    expect(resolveCandidatePaths(invocationOf('cat "$TARGET"'), "/project")).toContainEqual({
+      original: '"$TARGET"',
+      resolved: '"$TARGET"',
+      requiresConfirmation: true,
+    });
+  });
 });
 
 describe("resolvePath", () => {
@@ -74,5 +90,23 @@ describe("resolvePath", () => {
 
   it("relative resolves against cwd", () => {
     expect(resolvePath("src/a.txt", "/project")).toBe("/project/src/a.txt");
+  });
+});
+
+describe("classifyPath", () => {
+  it("classifies home-relative paths without confirmation", () => {
+    expect(classifyPath("~/.ssh/config", "/project")).toEqual({
+      original: "~/.ssh/config",
+      resolved: path.join(os.homedir(), ".ssh", "config"),
+      requiresConfirmation: false,
+    });
+  });
+
+  it("keeps named-user paths unresolved and requires confirmation", () => {
+    expect(classifyPath("~other", "/project")).toEqual({
+      original: "~other",
+      resolved: "~other",
+      requiresConfirmation: true,
+    });
   });
 });
