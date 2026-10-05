@@ -38,3 +38,7 @@
 - [x] 6.3 Ignore only missing plugin config files; warn and enter global degraded ask for every other read failure.
 - [x] 6.4 Align README, active specifications, and characterization labels with implemented behavior and adapter-level verification.
 - [x] 6.5 Run the complete remote test and build workflow after review hardening.
+- [x] 6.6 Traverse every executable-bearing unbash 4.0.3 AST field with independent command-context, structural-depth, visited-value, and invocation budgets.
+- [x] 6.7 Decode static quoted paths, force review for dynamic operands and redirects, and distinguish descriptor redirects from numeric filenames.
+- [x] 6.8 Preserve heredoc bodies, harden arithmetic and meta-command parsing, and reject non-object plugin config roots.
+- [ ] 6.9 Run the complete remote test and build workflow after the second hardening pass.
