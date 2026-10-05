@@ -13,13 +13,10 @@ import type { RestructureConfig } from "./plugin-config.js";
 
 export type ComplexityViolationKind = "segments" | "depth" | "inline-script";
 
-export interface ComplexityViolation {
-  kind: ComplexityViolationKind;
-  segmentCount?: number;
-  worstLine?: number;
-  interpreter?: string;
-  statementCount?: number;
-}
+export type ComplexityViolation =
+  | { kind: "segments"; segmentCount: number; worstLine?: number }
+  | { kind: "depth" }
+  | { kind: "inline-script"; interpreter: string; statementCount: number };
 
 /**
  * Strictly-greater threshold semantics: a metric equal to its limit passes.
@@ -72,6 +69,14 @@ export function buildRejectionMessage(violation: ComplexityViolation, chain: Par
   }
 
   const depth = chain.maxDepth;
+  if (violation.kind === "depth") {
+    const scope = command.includes("\n") ? "command" : "one-liner";
+    return (
+      `[opencode-bash-guard] Complex ${scope} rejected (nesting depth ${depth}).\n` +
+      "Re-issue as separate bash tool calls, or as a multi-line script with one command per line — each command is then permission-checked individually."
+    );
+  }
+
   if (command.includes("\n")) {
     return (
       `[opencode-bash-guard] Complex command rejected (line ${violation.worstLine}: ${violation.segmentCount} chained commands, nesting depth ${depth}).\n` +
