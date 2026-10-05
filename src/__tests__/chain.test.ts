@@ -176,7 +176,7 @@ describe("parseChain maxDepth", () => {
   });
 
   it("expansion inside meta-command body adds a level", () => {
-    expect(parseChain('bash -c "echo $(whoami)"').maxDepth).toBe(3);
+    expect(parseChain("bash -c 'echo $(whoami)'").maxDepth).toBe(3);
   });
 
   it("eval string arg counts as one level", () => {

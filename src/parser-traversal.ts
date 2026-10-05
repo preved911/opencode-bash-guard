@@ -55,8 +55,8 @@ type TraversableScript = Script & {
 };
 
 interface TraversalState {
-  readonly invocations: NormalizedInvocation[];
   readonly topLevelInvocations: NormalizedInvocation[];
+  readonly nestedInvocations: NormalizedInvocation[];
   readonly errors: string[];
   readonly seen: WeakSet<object>;
   visitedValues: number;
@@ -288,14 +288,14 @@ function visitCaseItem(item: CaseItem, frame: TraversalFrame, state: TraversalSt
 }
 
 function appendInvocation(command: Command, frame: TraversalFrame, state: TraversalState): void {
-  if (state.invocations.length >= MAX_INVOCATIONS) {
+  if (state.topLevelInvocations.length + state.nestedInvocations.length >= MAX_INVOCATIONS) {
     failBudget(state, COMMAND_LIMIT_ERROR);
     return;
   }
-  const built = buildInvocation(command, frame.ownerRedirects);
-  state.invocations.push(built.invocation);
-  state.errors.push(...built.errors);
+  const built = buildInvocation(command, frame.ownerRedirects, frame.source);
   if (frame.commandDepth === 1) state.topLevelInvocations.push(built.invocation);
+  else state.nestedInvocations.push(built.invocation);
+  state.errors.push(...built.errors);
 }
 
 function shellBasename(commandName: string): string {
@@ -457,8 +457,8 @@ function visitNode(node: Node, frame: TraversalFrame, state: TraversalState): vo
 
 export function traverseScript(script: TraversableScript, source: string): TraversalResult {
   const state: TraversalState = {
-    invocations: [],
     topLevelInvocations: [],
+    nestedInvocations: [],
     errors: [],
     seen: new WeakSet<object>(),
     visitedValues: 0,
@@ -473,7 +473,7 @@ export function traverseScript(script: TraversableScript, source: string): Trave
   };
   visitScript(script, frame, state);
   return {
-    invocations: state.invocations,
+    invocations: [...state.topLevelInvocations, ...state.nestedInvocations],
     topLevelInvocations: state.topLevelInvocations,
     errors: state.errors,
     maxDepth: state.maxDepth,

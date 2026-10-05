@@ -232,9 +232,9 @@ describe("characterization: substitutions and meta-command bodies", () => {
     expect(result.invocations.filter((s) => s.commandName === "ls")).toHaveLength(2);
   });
 
-  it("keeps stable preorder and preserves separate identical source occurrences", () => {
+  it("keeps top-level commands before nested commands and preserves separate identical source occurrences", () => {
     const result = parseChain('echo "$(touch /tmp/same)"; echo "$(touch /tmp/same)"');
-    expect(result.invocations.map((segment) => segment.commandName)).toEqual(["echo", "touch", "echo", "touch"]);
+    expect(result.invocations.map((segment) => segment.commandName)).toEqual(["echo", "echo", "touch", "touch"]);
     expect(result.topLevelInvocations.map((segment) => segment.commandName)).toEqual(["echo", "echo"]);
     expect(result.invocations.filter((segment) => segment.command === "touch /tmp/same")).toHaveLength(2);
   });
@@ -446,7 +446,7 @@ describe("characterization: exhaustive executable AST fields", () => {
       field: "arithmetic for initialize, test, and update expressions",
       command:
         "for ((i=$(touch /tmp/for-initialize); $(touch /tmp/for-test); i+=$(touch /tmp/for-update))); do echo ok; done",
-      expectedNames: ["touch", "touch", "touch", "echo"],
+      expectedNames: ["echo", "touch", "touch", "touch"],
     },
     {
       field: "while clause and body",
@@ -461,29 +461,27 @@ describe("characterization: exhaustive executable AST fields", () => {
     {
       field: "for wordlist and body",
       command: 'for item in "$(touch /tmp/for-wordlist)"; do echo "$item"; done',
-      expectedNames: ["touch", "echo"],
+      expectedNames: ["echo", "touch"],
     },
     {
       field: "select wordlist and body",
       command: 'select item in "$(touch /tmp/select-wordlist)"; do echo "$item"; done',
-      expectedNames: ["touch", "echo"],
+      expectedNames: ["echo", "touch"],
     },
     {
       field: "case subject, pattern, and body",
       command: 'case "$(touch /tmp/case-word)" in "$(touch /tmp/case-pattern)") echo body ;; esac',
-      expectedNames: ["touch", "touch", "echo"],
+      expectedNames: ["echo", "touch", "touch"],
     },
     {
       field: "command redirect target",
       command: 'echo body > "$(touch /tmp/command-redirect)"',
       expectedNames: ["echo", "touch"],
-      parseError: true,
     },
     {
       field: "statement owner redirect target",
       command: '{ echo body; } > "$(touch /tmp/statement-redirect)"',
       expectedNames: ["echo", "touch"],
-      parseError: true,
     },
     {
       field: "subshell body",
@@ -494,13 +492,11 @@ describe("characterization: exhaustive executable AST fields", () => {
       field: "function owner redirect target",
       command: 'worker() { echo body; } > "$(touch /tmp/function-redirect)"',
       expectedNames: ["echo", "touch"],
-      parseError: true,
     },
     {
       field: "coproc owner redirect target",
       command: 'coproc worker { echo body; } > "$(touch /tmp/coproc-redirect)"',
       expectedNames: ["echo", "touch"],
-      parseError: true,
     },
     {
       field: "heredoc redirect body",
@@ -521,49 +517,41 @@ describe("characterization: exhaustive executable AST fields", () => {
       field: "process substitution",
       command: "cat <(touch /tmp/process-substitution)",
       expectedNames: ["cat", "touch"],
-      parseError: true,
     },
     {
       field: "arithmetic expansion",
       command: 'echo "$((1 + $(touch /tmp/arithmetic-expansion)))"',
       expectedNames: ["echo", "touch"],
-      parseError: true,
     },
     {
       field: "locale string child",
       command: 'echo $"$(touch /tmp/locale-string)"',
       expectedNames: ["echo", "touch"],
-      parseError: true,
     },
     {
       field: "parameter operand",
       command: 'echo "${value:-$(touch /tmp/parameter-operand)}"',
       expectedNames: ["echo", "touch"],
-      parseError: true,
     },
     {
       field: "parameter slice offset",
       command: 'echo "${value:$(touch /tmp/parameter-offset):1}"',
       expectedNames: ["echo", "touch"],
-      parseError: true,
     },
     {
       field: "parameter slice length",
       command: 'echo "${value:0:$(touch /tmp/parameter-length)}"',
       expectedNames: ["echo", "touch"],
-      parseError: true,
     },
     {
       field: "parameter replacement pattern",
       command: 'echo "${value/$(touch)/replacement}"',
       expectedNames: ["echo", "touch"],
-      parseError: true,
     },
     {
       field: "parameter replacement value",
       command: 'echo "${value/pattern/$(touch)}"',
       expectedNames: ["echo", "touch"],
-      parseError: true,
     },
   ];
 

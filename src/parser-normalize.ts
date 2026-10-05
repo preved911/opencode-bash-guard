@@ -81,9 +81,13 @@ function getCommandText(command: Command): string {
   return parts.join(" ");
 }
 
-function normalizeRedirect(redirect: Redirect): RedirectInfo {
+function normalizeRedirect(redirect: Redirect, source: string | null): RedirectInfo {
   const heredoc = redirect.operator === "<<" || redirect.operator === "<<-";
-  const rawTarget = redirect.target?.text ?? (heredoc ? "" : redirect.content ?? "");
+  const rawTarget = redirect.target
+    ? (source?.slice(redirect.target.pos, redirect.target.end) ?? redirect.target.text)
+    : heredoc
+      ? ""
+      : (redirect.content ?? "");
   const targetValue = redirect.target ? (heredoc ? redirect.target.value : staticWordValue(redirect.target)) : rawTarget;
   const target = targetValue ?? rawTarget;
   const descriptorTarget = redirect.operator === "<&" || redirect.operator === ">&";
@@ -107,7 +111,7 @@ function normalizeCandidate(word: Word): NormalizedWordValue {
   return { raw: word.text, value: staticWordValue(word) };
 }
 
-export function buildInvocation(command: Command, ownerRedirects: readonly Redirect[]): InvocationBuildResult {
+export function buildInvocation(command: Command, ownerRedirects: readonly Redirect[], source: string | null): InvocationBuildResult {
   const errors: string[] = [];
   const candidatePaths: string[] = [];
   const candidatePathDetails: NormalizedWordValue[] = [];
@@ -128,7 +132,10 @@ export function buildInvocation(command: Command, ownerRedirects: readonly Redir
       command: getCommandText(command),
       commandName: command.name ? staticWordValue(command.name) ?? stripQuotePairs(command.name.text) : "",
       argv: extractArgv(command),
-      redirects: [...command.redirects.map(normalizeRedirect), ...ownerRedirects.map(normalizeRedirect)],
+      redirects: [
+        ...command.redirects.map((redirect) => normalizeRedirect(redirect, source)),
+        ...ownerRedirects.map((redirect) => normalizeRedirect(redirect, source)),
+      ],
       candidatePaths,
       candidatePathDetails,
     },
