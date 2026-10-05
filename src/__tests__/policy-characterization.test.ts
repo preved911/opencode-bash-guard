@@ -243,6 +243,17 @@ describe("characterization: segment resolution (glob fallback + paths + redirect
     expect(action).toBe("ask");
   });
 
+  it("unresolved named-user tilde forces ask over glob and args allow", () => {
+    const config: PluginConfig = {
+      ...defaultConfig,
+      bashRules: [{ pattern: "*", action: "allow" }],
+      toolPermissions: [{ tool: "cat", args: [{ position: 0, pattern: "*", action: "allow" }] }],
+    };
+    const { action, allowFromArgsRule } = resolveSegment(inv("cat ~other/.ssh/config"), "/project", config);
+    expect(action).toBe("ask");
+    expect(allowFromArgsRule).toBe(false);
+  });
+
   it("well-known redirect contributes nothing", () => {
     const config: PluginConfig = {
       bashRules: [{ pattern: "*", action: "allow" }],

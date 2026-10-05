@@ -64,18 +64,24 @@ export function resolveSegment(invocation: NormalizedInvocation, cwd: string, co
     return { action: "ask", allowFromArgsRule: false };
   }
 
+  const paths = resolveCandidatePaths(invocation, cwd);
+  const requiresPathConfirmation = paths.some((candidate) => candidate.requiresConfirmation);
+
   // Pipeline order (spec): args rules decide the segment when any matcher matched; otherwise the legacy glob evaluation.
   const argsAction = matchToolPermissions(tokens, config.toolPermissions);
   if (argsAction !== null) {
+    if (requiresPathConfirmation && argsAction !== "deny") {
+      return { action: "ask", allowFromArgsRule: false };
+    }
     return { action: argsAction, allowFromArgsRule: argsAction === "allow" };
   }
 
   const bashAction = matchBashPermission(invocation.command, config.bashRules);
 
-  const paths = resolveCandidatePaths(invocation, cwd);
-  let edAction: "ask" | "allow" | "deny" | null = null;
+  let edAction: "ask" | "allow" | "deny" | null = requiresPathConfirmation ? "ask" : null;
 
   for (const p of paths) {
+    if (p.requiresConfirmation) continue;
     const result = matchExternalDirectory(p.resolved, config.externalDirectoryRules, config.externalDirectoryDefault, cwd);
     if (result.violated && result.action) {
       if (result.action === "deny" || edAction !== "deny") {

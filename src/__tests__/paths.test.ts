@@ -33,6 +33,16 @@ describe("resolveCandidatePaths", () => {
     const tildePath = paths.find((p) => p.original === "~/.ssh/config");
     expect(tildePath).toBeDefined();
     expect(tildePath!.resolved).toContain("/.ssh/config");
+    expect(tildePath!.requiresConfirmation).toBe(false);
+  });
+
+  it("marks named-user tilde paths as unresolved", () => {
+    const paths = resolveCandidatePaths(invocationOf("cat ~other/.ssh/config"), "/project");
+    expect(paths).toContainEqual({
+      original: "~other/.ssh/config",
+      resolved: "~other/.ssh/config",
+      requiresConfirmation: true,
+    });
   });
 
   it("resolves absolute paths", () => {
@@ -44,8 +54,16 @@ describe("resolveCandidatePaths", () => {
 });
 
 describe("resolvePath", () => {
+  it("bare tilde resolves to homedir", () => {
+    expect(resolvePath("~", "/project")).toBe(os.homedir());
+  });
+
   it("tilde resolves against homedir", () => {
-    expect(resolvePath("~/.ssh/config", "/")).toContain("/.ssh/config");
+    expect(resolvePath("~/.ssh/config", "/")).toBe(path.join(os.homedir(), ".ssh", "config"));
+  });
+
+  it("named-user tilde remains unresolved", () => {
+    expect(resolvePath("~other/.ssh/config", "/project")).toBe("~other/.ssh/config");
   });
 
   it("absolute resolves to itself", () => {

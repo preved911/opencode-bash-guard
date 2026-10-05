@@ -5,6 +5,7 @@ import type { NormalizedInvocation } from "./parser.js";
 export interface ExtractedPath {
   original: string;
   resolved: string;
+  requiresConfirmation: boolean;
 }
 
 /**
@@ -16,13 +17,14 @@ export function resolveCandidatePaths(invocation: NormalizedInvocation, cwd: str
   return invocation.candidatePaths.map((p) => ({
     original: p,
     resolved: resolvePath(p, cwd),
+    requiresConfirmation: /^~[^/]/.test(p),
   }));
 }
 
 export function resolvePath(p: string, cwd: string): string {
-  if (p.startsWith("~")) {
-    return path.resolve(os.homedir(), p.slice(1));
-  }
+  if (p === "~") return os.homedir();
+  if (p.startsWith("~/")) return path.resolve(os.homedir(), p.slice(2));
+  if (/^~[^/]/.test(p)) return p;
   if (path.isAbsolute(p)) {
     return path.resolve(p);
   }
