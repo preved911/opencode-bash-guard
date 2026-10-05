@@ -9,7 +9,7 @@ import type { PluginConfig } from "../config.js";
 import type { RestructureConfig } from "../plugin-config.js";
 
 /**
- * Characterization tests (task 1.4): lock end-to-end hook behavior — readability
+ * Characterization tests (task 1.4): lock adapter-level hook behavior — readability
  * thresholds and messages, command wrapping, single-use callID handoff and cleanup
  * between `tool.execute.before` and `permission.asked`, and unchanged prompt count
  * and trigger points across allow, ask, deny, chained, nested, empty, disabled,
