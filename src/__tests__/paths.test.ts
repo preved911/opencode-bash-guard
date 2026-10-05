@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import os from "os";
+import path from "path";
 import { resolveCandidatePaths, resolvePath } from "../paths.js";
 import { parseCommand as parseChain } from "../parser.js";
 import type { NormalizedInvocation } from "../parser.js";
