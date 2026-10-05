@@ -173,6 +173,10 @@ export function parsePluginConfig(files: PluginConfigFile[]): PluginFileConfig {
   }
   const markerHonored = markerSource === permissionsSource ? merged.matcherVersion : undefined;
 
+  if (merged.permissions !== undefined && validated.globalDegraded) {
+    return { restructure, toolPermissions: [], forcedAskTools: [], degraded: true };
+  }
+
   const rawPermissions = Array.isArray(merged.permissions) ? (merged.permissions as unknown[]) : [];
   if (rawPermissions.length > 0) {
     if (markerHonored === undefined) {

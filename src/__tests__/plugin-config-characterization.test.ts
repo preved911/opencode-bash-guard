@@ -123,6 +123,25 @@ describe("characterization: invalid JSONC → global degraded ask-everything", (
 });
 
 describe("characterization: invalid individual entries → scoped forced-ask", () => {
+  it("effective matcher-v2 permissions with an unscopable sibling discard every allow", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const globalFile = file(
+      "global.jsonc",
+      '{"matcherVersion": 2, "permissions": [{"tool": "global", "args": [{"token": ["read"], "action": "allow"}]}]}',
+    );
+    const projectFile = file(
+      "project.jsonc",
+      '{"matcherVersion": 2, "permissions": [{"tool": "git", "args": [{"token": ["status"], "action": "allow"}]}, {"args": [{"token": "-x", "action": "deny"}]}]}',
+    );
+
+    const result = parsePluginConfig([globalFile, projectFile]);
+
+    expect(result.degraded).toBe(true);
+    expect(result.toolPermissions).toEqual([]);
+    expect(result.forcedAskTools).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("missing tool or args"));
+  });
+
   it("invalid entry drops the rule and scopes ask to its tool; valid siblings keep working", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const content = `{
