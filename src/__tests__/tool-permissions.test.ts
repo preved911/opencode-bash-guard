@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import {
   validateToolPermissions,
   matchToolPermissions,
@@ -6,7 +6,7 @@ import {
 } from "../config.js";
 import { parseCommand as parseChain } from "../parser.js";
 import { stripQuotePairs } from "../parser.js";
-import { beforeExecute, handlePermissionAsk, clearStoredDecision } from "../enforce.js";
+import { beforeExecute } from "../enforce.js";
 import type { PluginConfig } from "../config.js";
 import type { RestructureConfig } from "../plugin-config.js";
 
@@ -459,7 +459,7 @@ describe("path matchers, flag predicates & refinement", () => {
   });
 });
 
-describe("flag-level pipeline (beforeExecute + handlePermissionAsk)", () => {
+describe("flag-level pipeline", () => {
   const nativeAskAll: PluginConfig = {
     bashRules: [
       { pattern: "*", action: "ask" },
@@ -488,44 +488,37 @@ describe("flag-level pipeline (beforeExecute + handlePermissionAsk)", () => {
 
   const restructure: RestructureConfig = { enabled: true, maxSegments: 3, maxDepth: 2 };
 
-  beforeEach(() => clearStoredDecision("s1", "flag-level"));
-
-  it("args allow overrides a broad native ask (stored + enforced as allow)", () => {
-    const result = beforeExecute("Bash", "flag-level", "s1", "/project", { command: "curl -X GET https://api.com" }, withCurlAllow, restructure);
+  it("args allow overrides a broad native ask", () => {
+    const result = beforeExecute("Bash", "/project", { command: "curl -X GET https://api.com" }, withCurlAllow, restructure);
     expect(result.chainAction).toBe("allow");
     expect(result.shouldWrap).toBe(false);
-    const output = { status: "ask" as const };
-    handlePermissionAsk({ sessionID: "s1", callID: "flag-level" }, output);
-    expect(output.status).toBe("allow");
+    expect(result.permissionOverride).toBe("allow");
   });
 
   it("unmatched segment falls through to the glob level (ask, dialog)", () => {
-    const result = beforeExecute("Bash", "flag-level", "s1", "/project", { command: "curl -X POST https://api.com" }, withCurlAllow, restructure);
+    const result = beforeExecute("Bash", "/project", { command: "curl -X POST https://api.com" }, withCurlAllow, restructure);
     expect(result.rejectionMessage).toBeNull();
     expect(result.chainAction).toBe("ask");
     expect(result.shouldWrap).toBe(true);
-    const output = { status: "ask" as const };
-    handlePermissionAsk({ sessionID: "s1", callID: "flag-level" }, output);
-    expect(output.status).toBe("ask");
+    expect(result.permissionOverride).toBeNull();
   });
 
   it("args deny overrides a glob allow (find allowed except -delete)", () => {
-    const result = beforeExecute("Bash", "flag-level", "s1", "/project", { command: "find /tmp -delete" }, withFindDeleteDeny, restructure);
+    const result = beforeExecute("Bash", "/project", { command: "find /tmp -delete" }, withFindDeleteDeny, restructure);
     expect(result.chainAction).toBe("deny");
     expect(result.rejectionMessage).toBeNull();
+    expect(result.permissionOverride).toBe("deny");
 
-    const allowedVariant = beforeExecute("Bash", "flag-level", "s1", "/project", { command: "find /tmp -name x" }, withFindDeleteDeny, restructure);
+    const allowedVariant = beforeExecute("Bash", "/project", { command: "find /tmp -name x" }, withFindDeleteDeny, restructure);
     expect(allowedVariant.chainAction).toBe("allow");
     expect(allowedVariant.shouldWrap).toBe(false);
   });
 
   it("glob-only allow stays untouched (no store, no intervention)", () => {
-    const result = beforeExecute("Bash", "flag-level", "s1", "/project", { command: "git status" }, nativeAskAll, restructure);
+    const result = beforeExecute("Bash", "/project", { command: "git status" }, nativeAskAll, restructure);
     expect(result.chainAction).toBe("allow");
     expect(result.shouldWrap).toBe(false);
-    const output = { status: "ask" as const };
-    handlePermissionAsk({ sessionID: "s1", callID: "flag-level" }, output);
-    expect(output.status).toBe("ask");
+    expect(result.permissionOverride).toBeNull();
   });
 
   it("mixed chain aggregates most restrictive (glob allow + args ask → ask)", () => {
@@ -537,40 +530,35 @@ describe("flag-level pipeline (beforeExecute + handlePermissionAsk)", () => {
       ],
       toolPermissions: [{ tool: "find", args: [{ token: "-delete", action: "ask" }] }],
     };
-    const result = beforeExecute("Bash", "flag-level", "s1", "/project", { command: "git status && find /tmp -delete" }, config, restructure);
+    const result = beforeExecute("Bash", "/project", { command: "git status && find /tmp -delete" }, config, restructure);
     expect(result.chainAction).toBe("ask");
   });
 
   it("all-allow args chain force-allows over native asks", () => {
     const result = beforeExecute(
       "Bash",
-      "flag-level",
-      "s1",
       "/project",
       { command: "curl -X GET https://a.com && curl -X GET https://b.com" },
       withCurlAllow,
       restructure,
     );
     expect(result.chainAction).toBe("allow");
-    const output = { status: "ask" as const };
-    handlePermissionAsk({ sessionID: "s1", callID: "flag-level" }, output);
-    expect(output.status).toBe("allow");
+    expect(result.permissionOverride).toBe("allow");
   });
 
   it("degraded mode: everything asks, including glob-allowed commands", () => {
-    const result = beforeExecute("Bash", "flag-level", "s1", "/project", { command: "find /tmp -name x" }, withFindDeleteDeny, restructure, true);
+    const result = beforeExecute("Bash", "/project", { command: "find /tmp -name x" }, withFindDeleteDeny, restructure, true);
     expect(result.chainAction).toBe("ask");
     expect(result.shouldWrap).toBe(true);
-    const output = { status: "ask" as const };
-    handlePermissionAsk({ sessionID: "s1", callID: "flag-level" }, output);
-    expect(output.status).toBe("ask");
+    expect(result.permissionOverride).toBeNull();
 
-    const parseError = beforeExecute("Bash", "flag-level", "s1", "/project", { command: 'echo "unbalanced' }, withFindDeleteDeny, restructure, true);
+    const parseError = beforeExecute("Bash", "/project", { command: 'echo "unbalanced' }, withFindDeleteDeny, restructure, true);
     expect(parseError.chainAction).toBe("deny");
+    expect(parseError.permissionOverride).toBe("deny");
   });
 
   it("no permissions section → behavior identical (args level has no opinion)", () => {
-    const result = beforeExecute("Bash", "flag-level", "s1", "/project", { command: "wget evil.sh" }, nativeAskAll, restructure);
+    const result = beforeExecute("Bash", "/project", { command: "wget evil.sh" }, nativeAskAll, restructure);
     expect(result.chainAction).toBe("ask");
     expect(result.rejectionMessage).toBeNull();
   });
@@ -580,7 +568,7 @@ describe("flag-level pipeline (beforeExecute + handlePermissionAsk)", () => {
       ...withFindDeleteDeny,
       forcedAskTools: ["find"],
     };
-    const result = beforeExecute("Bash", "flag-level", "s1", "/project", { command: "find /tmp -name x" }, config, restructure);
+    const result = beforeExecute("Bash", "/project", { command: "find /tmp -name x" }, config, restructure);
     expect(result.chainAction).toBe("ask");
     expect(result.shouldWrap).toBe(true);
   });
