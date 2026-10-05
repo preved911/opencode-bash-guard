@@ -12,6 +12,7 @@ opencode's `permission.bash` matches glob patterns against the full command stri
 2. **Path Extraction**: Walks the AST to extract file paths, using `@withfig/autocomplete` specs to distinguish flags from paths
 3. **Config Reading**: Reads `permission.bash` and `external_directory` from the merged opencode config — supports flat strings and object patterns
 4. **Enforcement**: Most-restrictive-wins across segments — deny > ask > no action. Fully-allowed chains pass through untouched; allowed stays allowed
+5. **Permission Handoff**: Uses `permission.asked` to deliver stored allow and deny decisions for the nested `tool.callID`
 
 ## Install
 
@@ -212,7 +213,6 @@ All tests are in `src/__tests__/`. Run `npm run test:watch` during development.
 - **Plugin config read once at startup**: `opencode-bash-guard.jsonc` is read once when the plugin initializes. Changes require an opencode restart.
 - **Heuristic inline-script statement counting**: Interpreter scripts are split on `;` and newlines. Strings containing semicolons can be miscounted; the heuristic errs toward rejecting unreadable blobs.
 - **No retry counter**: Repeated violations get the same rejection every time (no escalation). A compliant re-issue always exists (multi-line, one command per line).
-- **`permission.ask` reliability**: Issue anomalyco/opencode#19469 suggests the `permission.ask` hook may not fire in current opencode, which could affect the plugin's deny path — pending separate verification.
 - **Path extraction misses**: Fig may not have specs for all commands. Falls back to heuristic (skip `-*` tokens). If false positives occur, add more specific bash permission rules.
 - **Performance**: AST parsing is heavier than string scanning, but only runs when chain operators (`&&`, `||`, `;`, `|`) are detected.
 - **unbash edge cases**: Complex shell syntax may cause partial parses. The plugin denies the entire command (fail closed) on any parse error — safer to miss a real command than let one through.
