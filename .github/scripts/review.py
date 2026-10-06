@@ -26,11 +26,12 @@ from dataclasses import dataclass, field
 
 # GitHub Models (GH_MODELS_TOKEN) was retired 2026-07-30 — do not restore it.
 # Free Gemini models 503 under load; AI_MODELS is tried in order until one answers.
+# gemini-3.7-flash is unavailable and was dropped from the defaults.
 # Provider swap: AI_BASE_URL=https://api.groq.com/openai/v1 AI_MODELS=openai/gpt-oss-120b
 AI_BASE_URL = os.environ.get(
     'AI_BASE_URL', 'https://generativelanguage.googleapis.com/v1beta/openai').rstrip('/')
 AI_MODELS = [m.strip() for m in os.environ.get(
-    'AI_MODELS', 'gemini-3.7-flash,gemini-3.5-flash,gemini-3.5-flash-lite').split(',') if m.strip()]
+    'AI_MODELS', 'gemini-3.5-flash,gemini-3.5-flash-lite').split(',') if m.strip()]
 AI_API_KEY = os.environ.get('AI_API_KEY', '')
 
 MAX_CHUNK = 40000     # per-chunk character budget for diff text
