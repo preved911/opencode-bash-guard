@@ -10,6 +10,7 @@ from collections.abc import Callable
 
 from review import (
     Budget,
+    Candidate,
     Chunk,
     Coverage,
     Deadline,
@@ -20,6 +21,7 @@ from review import (
     new_side_ranges,
     parse_findings,
     render_review_body,
+    review_event,
     run_review,
     skip_reason,
     split_section,
@@ -543,6 +545,26 @@ class TestVerifierPrompt(unittest.TestCase):
         v = parse_verdict({'verdict': 'PLAUSIBLE', 'reason': 'race', 'confirmation': 'run twice'})
         self.assertEqual('PLAUSIBLE', v.verdict if v else '')
         self.assertEqual('run twice', v.confirmation if v else '')
+
+
+class TestReviewEvent(unittest.TestCase):
+    @staticmethod
+    def finding(severity: str) -> Finding:
+        cand = Candidate('src/a.ts', 1, 't', 'correctness', 'trigger', 'effect', 'mechanism', 'fix', 1)
+        return Finding(cand, severity, 'CONFIRMED')
+
+    def test_verified_bug_requests_changes_even_when_incomplete(self):
+        self.assertEqual('REQUEST_CHANGES', review_event([self.finding('bug')], Coverage()))
+        self.assertEqual('REQUEST_CHANGES', review_event([self.finding('bug')], Coverage(failed_chunks=[1])))
+
+    def test_full_coverage_without_bugs_approves(self):
+        # APPROVE is what clears the bot's own earlier REQUEST_CHANGES after a fix
+        self.assertEqual('APPROVE', review_event([], Coverage()))
+        self.assertEqual('APPROVE', review_event([self.finding('nit')], Coverage()))
+
+    def test_incomplete_coverage_never_approves(self):
+        self.assertEqual('COMMENT', review_event([], Coverage(failed_chunks=[1])))
+        self.assertEqual('COMMENT', review_event([self.finding('nit')], Coverage(unverified=2)))
 
 
 class TestCandidateGate(unittest.TestCase):

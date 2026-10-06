@@ -629,6 +629,19 @@ def inline_comment(finding: Finding) -> str:
     return '\n'.join(lines)
 
 
+def review_event(findings: list[Finding], coverage: Coverage) -> str:
+    """GitHub review event for the publish call.
+
+    Verified bug findings request changes — under required pull request
+    reviews that blocks the merge. With full coverage and no bugs the bot
+    approves, which is exactly what clears its own earlier REQUEST_CHANGES
+    after a fix. Incomplete coverage never approves what it did not see.
+    """
+    if any(f.severity == 'bug' for f in findings):
+        return 'REQUEST_CHANGES'
+    return 'APPROVE' if coverage.complete() else 'COMMENT'
+
+
 def render_review_body(findings: list[Finding], coverage: Coverage, models_note: str) -> str:
     parts: list[str] = ['## 👀 AI Code Review', '']
     if findings:
@@ -986,8 +999,12 @@ def main() -> None:
 
     models_note = ', '.join(sorted(set(models_used))) if models_used else 'none'
     body_text = render_review_body(findings, coverage, models_note)
+    event = review_event(findings, coverage)
 
-    if findings:
+    if event == 'COMMENT' and not findings:
+        # Nothing to anchor and nothing to unblock: a plain comment is enough.
+        _post_comment(gh, pr_num, body_text)
+    else:
         comments: list[dict[str, object]] = [
             {
                 'path': f.candidate.path,
@@ -999,16 +1016,25 @@ def main() -> None:
         ]
         review = gh_api(gh, f'/pulls/{pr_num}/reviews', data={
             'body': body_text,
-            'event': 'COMMENT',
+            'event': event,
             'comments': comments,
         })
         if review:
-            print(f'Review submitted with {len(comments)} inline comment(s) across {len(chunks)} diff part(s)')
+            print(f'Review submitted ({event}) with {len(comments)} inline comment(s) across {len(chunks)} diff part(s)')
         else:
-            print('Inline review failed, posting as single comment', file=sys.stderr)
+            print(f'{event} review failed, posting as single comment', file=sys.stderr)
             _post_comment(gh, pr_num, body_text)
-    else:
-        _post_comment(gh, pr_num, body_text)
+            if event == 'REQUEST_CHANGES':
+                # The findings exist but the blocking review did not land:
+                # failing the job keeps the lost block visible.
+                print('Blocking review could not be submitted — failing the job.', file=sys.stderr)
+                sys.exit(1)
+
+    if not coverage.complete():
+        # Partially reviewed material must never look like a passed review:
+        # the findings above are published, and the red check marks the gap.
+        print(f'Review coverage incomplete: {"; ".join(coverage.reasons())} — failing the job so the gap is visible.', file=sys.stderr)
+        sys.exit(1)
 
 
 def _unquote_git_path(path: str) -> str:
