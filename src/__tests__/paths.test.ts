@@ -1,9 +1,19 @@
 import { describe, it, expect } from "vitest";
-import { extractPaths, extractPotentialPaths } from "../paths.js";
+import os from "os";
+import path from "path";
+import { classifyPath, resolveCandidatePaths, resolvePath } from "../paths.js";
+import { parseCommand as parseChain } from "../parser.js";
+import type { NormalizedInvocation } from "../parser.js";
 
-describe("extractPaths", () => {
+function invocationOf(command: string): NormalizedInvocation {
+  const parsed = parseChain(command).invocations[0];
+  if (!parsed) throw new Error(`unparseable fixture: ${command}`);
+  return parsed;
+}
+
+describe("resolveCandidatePaths", () => {
   it("extracts path arguments and resolves relative paths", () => {
-    const paths = extractPaths("grep -r pattern ./src", "/project");
+    const paths = resolveCandidatePaths(invocationOf("grep -r pattern ./src"), "/project");
     expect(paths.length).toBeGreaterThan(0);
     const srcPath = paths.find((p) => p.original === "./src");
     expect(srcPath).toBeDefined();
@@ -11,38 +21,92 @@ describe("extractPaths", () => {
   });
 
   it("returns no paths for command with no arguments", () => {
-    const paths = extractPaths("ls", "/");
+    const paths = resolveCandidatePaths(invocationOf("ls"), "/");
     expect(paths).toHaveLength(0);
   });
 
   it("skips flag arguments", () => {
-    const paths = extractPaths("ls -la -r", "/");
+    const paths = resolveCandidatePaths(invocationOf("ls -la -r"), "/");
     expect(paths).toHaveLength(0);
   });
 
   it("resolves tilde to home directory", () => {
-    const paths = extractPaths("cat ~/.ssh/config", "/");
+    const paths = resolveCandidatePaths(invocationOf("cat ~/.ssh/config"), "/");
     const tildePath = paths.find((p) => p.original === "~/.ssh/config");
     expect(tildePath).toBeDefined();
     expect(tildePath!.resolved).toContain("/.ssh/config");
+    expect(tildePath!.requiresConfirmation).toBe(false);
+  });
+
+  it("marks named-user tilde paths as unresolved", () => {
+    const paths = resolveCandidatePaths(invocationOf("cat ~other/.ssh/config"), "/project");
+    expect(paths).toContainEqual({
+      original: "~other/.ssh/config",
+      resolved: "~other/.ssh/config",
+      requiresConfirmation: true,
+    });
   });
 
   it("resolves absolute paths", () => {
-    const paths = extractPaths("cat /etc/hosts", "/");
+    const paths = resolveCandidatePaths(invocationOf("cat /etc/hosts"), "/");
     const etcPath = paths.find((p) => p.original === "/etc/hosts");
     expect(etcPath).toBeDefined();
     expect(etcPath!.resolved).toBe("/etc/hosts");
   });
-});
 
-describe("extractPotentialPaths", () => {
-  it("filters out flag tokens", () => {
-    const paths = extractPotentialPaths("ls -la -r");
-    expect(paths).toHaveLength(0);
+  it("resolves quote-decoded absolute paths outside cwd", () => {
+    expect(resolveCandidatePaths(invocationOf('cat "/etc/passwd"'), "/project")).toContainEqual({
+      original: "/etc/passwd",
+      resolved: "/etc/passwd",
+      requiresConfirmation: false,
+    });
   });
 
-  it("keeps non-flag tokens", () => {
-    const paths = extractPotentialPaths("cat /etc/passwd");
-    expect(paths).toContain("/etc/passwd");
+  it("requires confirmation for dynamic path operands", () => {
+    expect(resolveCandidatePaths(invocationOf('cat "$TARGET"'), "/project")).toContainEqual({
+      original: '"$TARGET"',
+      resolved: '"$TARGET"',
+      requiresConfirmation: true,
+    });
+  });
+});
+
+describe("resolvePath", () => {
+  it("bare tilde resolves to homedir", () => {
+    expect(resolvePath("~", "/project")).toBe(os.homedir());
+  });
+
+  it("tilde resolves against homedir", () => {
+    expect(resolvePath("~/.ssh/config", "/")).toBe(path.join(os.homedir(), ".ssh", "config"));
+  });
+
+  it("named-user tilde remains unresolved", () => {
+    expect(resolvePath("~other/.ssh/config", "/project")).toBe("~other/.ssh/config");
+  });
+
+  it("absolute resolves to itself", () => {
+    expect(resolvePath("/etc/hosts", "/project")).toBe("/etc/hosts");
+  });
+
+  it("relative resolves against cwd", () => {
+    expect(resolvePath("src/a.txt", "/project")).toBe("/project/src/a.txt");
+  });
+});
+
+describe("classifyPath", () => {
+  it("classifies home-relative paths without confirmation", () => {
+    expect(classifyPath("~/.ssh/config", "/project")).toEqual({
+      original: "~/.ssh/config",
+      resolved: path.join(os.homedir(), ".ssh", "config"),
+      requiresConfirmation: false,
+    });
+  });
+
+  it("keeps named-user paths unresolved and requires confirmation", () => {
+    expect(classifyPath("~other", "/project")).toEqual({
+      original: "~other",
+      resolved: "~other",
+      requiresConfirmation: true,
+    });
   });
 });

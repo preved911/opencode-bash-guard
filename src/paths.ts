@@ -1,73 +1,41 @@
-import { parse } from "unbash";
-import type { Script, Command } from "unbash";
 import path from "path";
 import os from "os";
+import type { NormalizedInvocation } from "./parser.js";
 
 export interface ExtractedPath {
   original: string;
   resolved: string;
+  requiresConfirmation: boolean;
 }
 
-function getWordsFromCommand(cmd: Command): string[] {
-  const words: string[] = [];
-  for (const word of cmd.suffix) {
-    words.push(word.text);
+/**
+ * Resolve candidate path operands from a normalized invocation against the
+ * working directory. Candidate extraction is syntactic (done by the parser
+ * boundary); this module only resolves them — no shell reparsing.
+ */
+export function resolveCandidatePaths(invocation: NormalizedInvocation, cwd: string): ExtractedPath[] {
+  if (invocation.candidatePathDetails) {
+    return invocation.candidatePathDetails.map((candidate) =>
+      candidate.value === null
+        ? { original: candidate.raw, resolved: candidate.raw, requiresConfirmation: true }
+        : classifyPath(candidate.value, cwd),
+    );
   }
-  return words;
+  return invocation.candidatePaths.map((candidate) => classifyPath(candidate, cwd));
 }
 
-function extractWordTokens(command: string): string[] {
-  const result = parse(command);
-  if (result.errors && result.errors.length > 0) {
-    return [];
-  }
-  const words: string[] = [];
-  function walkCommands(node: any): void {
-    if (node.type === "Command") {
-      words.push(...getWordsFromCommand(node as Command));
-    } else if (node.type === "Pipeline") {
-      for (const c of node.commands) walkCommands(c);
-    } else if (node.type === "AndOr") {
-      for (const c of node.commands) walkCommands(c);
-    }
-  }
-  for (const stmt of result.commands) {
-    walkCommands(stmt.command);
-  }
-  return words;
+export function classifyPath(candidate: string, cwd: string): ExtractedPath {
+  return {
+    original: candidate,
+    resolved: resolvePath(candidate, cwd),
+    requiresConfirmation: /^~[^/]/.test(candidate),
+  };
 }
 
-export function extractPotentialPaths(segmentCommand: string): string[] {
-  const words = extractWordTokens(segmentCommand);
-  return words.filter((w) => !w.startsWith("-"));
-}
-
-function isFlagByFigSpec(commandName: string, token: string): boolean {
-  if (token.startsWith("-")) return true;
-  return false;
-}
-
-export function extractPaths(segmentCommand: string, cwd: string): ExtractedPath[] {
-  const commandName = segmentCommand.split(/\s+/)[0] || "";
-  const words = extractWordTokens(segmentCommand);
-  const potential: string[] = [];
-
-  for (const w of words) {
-    if (!isFlagByFigSpec(commandName, w)) {
-      potential.push(w);
-    }
-  }
-
-  return potential.map((p) => ({
-    original: p,
-    resolved: resolvePath(p, cwd),
-  }));
-}
-
-function resolvePath(p: string, cwd: string): string {
-  if (p.startsWith("~")) {
-    return path.resolve(os.homedir(), p.slice(1));
-  }
+export function resolvePath(p: string, cwd: string): string {
+  if (p === "~") return os.homedir();
+  if (p.startsWith("~/")) return path.resolve(os.homedir(), p.slice(2));
+  if (/^~[^/]/.test(p)) return p;
   if (path.isAbsolute(p)) {
     return path.resolve(p);
   }

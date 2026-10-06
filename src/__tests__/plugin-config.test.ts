@@ -53,6 +53,19 @@ describe("readPluginConfigFiles", () => {
       fs.unlinkSync(existing);
     }
   });
+
+  it("retains non-ENOENT read failures for degraded parsing", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const denied = Object.assign(new Error("permission denied"), { code: "EACCES" });
+    vi.spyOn(fs, "readFileSync").mockImplementation(() => {
+      throw denied;
+    });
+
+    const files = readPluginConfigFiles(["/unreadable/opencode-bash-guard.jsonc"]);
+    expect(files).toEqual([{ path: "/unreadable/opencode-bash-guard.jsonc", readError: "permission denied" }]);
+    expect(parsePluginConfig(files).degraded).toBe(true);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("/unreadable/opencode-bash-guard.jsonc"));
+  });
 });
 
 describe("parsePluginConfig", () => {
@@ -96,6 +109,41 @@ describe("parsePluginConfig", () => {
     expect(result.degraded).toBe(true);
     expect(result.restructure.enabled).toBe(false);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("project.jsonc"));
+  });
+
+  it("array root → global degraded ask", () => {
+    const result = parsePluginConfig([file("global.jsonc", "[]")]);
+
+    expect(result).toEqual({
+      restructure: DEFAULT_RESTRUCTURE_CONFIG,
+      toolPermissions: [],
+      forcedAskTools: [],
+      degraded: true,
+    });
+  });
+
+  it("higher-precedence array root → global degraded ask despite a valid lower-precedence object", () => {
+    const globalFile = file("global.jsonc", '{"restructure": { "enabled": true, "max_segments": 5 }}');
+    const projectFile = file("project.jsonc", "[]");
+
+    const result = parsePluginConfig([globalFile, projectFile]);
+
+    expect(result).toEqual({
+      restructure: DEFAULT_RESTRUCTURE_CONFIG,
+      toolPermissions: [],
+      forcedAskTools: [],
+      degraded: true,
+    });
+  });
+
+  it.each(["null", '"invalid"', "42", "true"])("scalar root %s → global degraded ask", (content) => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(parsePluginConfig([file("global.jsonc", content)])).toEqual({
+      restructure: DEFAULT_RESTRUCTURE_CONFIG,
+      toolPermissions: [],
+      forcedAskTools: [],
+      degraded: true,
+    });
   });
 
   it("invalid thresholds → warning + defaults apply", () => {

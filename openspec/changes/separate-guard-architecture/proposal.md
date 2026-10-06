@@ -7,8 +7,8 @@ The guard's parsing, configuration handling, policy decisions, readability check
 - Reorganize the guard around distinct parsing, normalized invocation, policy evaluation, readability, and OpenCode adapter layers.
 - Preserve the current matcherVersion 2 JSONC configuration behavior, including global then project precedence and degraded-mode handling.
 - Preserve existing decision semantics for glob, structured argument, path, redirect, and chain evaluation.
-- Preserve optional readability and restructuring behavior, including its thresholds, rejection conditions, and messages.
-- Preserve `tool.execute.before` and `permission.ask` behavior, including callID decision handoff.
+- Preserve optional readability and restructuring behavior, including strict-greater thresholds and thrown guidance errors for ask-resolving commands that exceed a configured threshold.
+- Preserve `tool.execute.before` and `permission.asked` behavior, including the nested `tool.callID` decision handoff and SDK replies.
 - Preserve permission prompt cardinality and trigger points for each tool invocation and callID, including chained and nested commands.
 - Add characterization coverage before extraction and require regression parity after the refactor.
 

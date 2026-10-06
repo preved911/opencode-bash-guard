@@ -36,10 +36,9 @@ export const DEFAULT_PLUGIN_FILE_CONFIG: PluginFileConfig = {
 const CONFIG_FILE_NAME = "opencode-bash-guard.jsonc";
 
 /** A config file read from disk, in increasing precedence order. */
-export interface PluginConfigFile {
-  path: string;
-  content: string;
-}
+export type PluginConfigFile =
+  | { path: string; content: string }
+  | { path: string; readError: string };
 
 /**
  * Discover the opencode-bash-guard.jsonc locations in increasing precedence:
@@ -55,8 +54,8 @@ export function pluginConfigPaths(projectDir: string): string[] {
 }
 
 /**
- * Read every config file that exists. Missing (or otherwise unreadable) files
- * are skipped silently per spec; invalid JSONC is handled at parse time.
+ * Read every config file that exists. Missing files are skipped silently;
+ * other read failures are retained so parsing can fail closed.
  */
 export function readPluginConfigFiles(paths: string[]): PluginConfigFile[] {
   const files: PluginConfigFile[] = [];
@@ -64,8 +63,9 @@ export function readPluginConfigFiles(paths: string[]): PluginConfigFile[] {
     try {
       const content = fs.readFileSync(filePath, "utf8");
       files.push({ path: filePath, content });
-    } catch {
-      // Missing file at a location is not an error — skip silently.
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") continue;
+      files.push({ path: filePath, readError: error instanceof Error ? error.message : String(error) });
     }
   }
   return files;
@@ -134,16 +134,23 @@ export function parsePluginConfig(files: PluginConfigFile[]): PluginFileConfig {
   let markerSource = -1;
 
   for (const [index, file] of files.entries()) {
+    if ("readError" in file) {
+      console.warn(
+        `[opencode-bash-guard] Cannot read ${file.path}: ${file.readError} — degraded mode: every bash command will ask until the file is readable.`,
+      );
+      allValid = false;
+      continue;
+    }
     const errors: ParseError[] = [];
     const parsed = parseJsonc(file.content, errors, { allowTrailingComma: true });
-    if (errors.length > 0 || parsed === undefined || parsed === null || typeof parsed !== "object") {
+    if (errors.length > 0 || !isPlainObject(parsed)) {
       console.warn(
         `[opencode-bash-guard] Invalid JSONC in ${file.path} — degraded mode: every bash command will ask until the file is fixed.`,
       );
       allValid = false;
       continue;
     }
-    const parsedObject = parsed as Record<string, unknown>;
+    const parsedObject = parsed;
     if (parsedObject.permissions !== undefined) permissionsSource = index;
     if (parsedObject.matcherVersion !== undefined) markerSource = index;
     merged = deepMerge(merged, parsedObject);
@@ -172,6 +179,10 @@ export function parsePluginConfig(files: PluginConfigFile[]): PluginFileConfig {
     );
   }
   const markerHonored = markerSource === permissionsSource ? merged.matcherVersion : undefined;
+
+  if (merged.permissions !== undefined && validated.globalDegraded) {
+    return { restructure, toolPermissions: [], forcedAskTools: [], degraded: true };
+  }
 
   const rawPermissions = Array.isArray(merged.permissions) ? (merged.permissions as unknown[]) : [];
   if (rawPermissions.length > 0) {
