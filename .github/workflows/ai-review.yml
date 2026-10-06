@@ -4,6 +4,8 @@ on: pull_request
 jobs:
   review:
     runs-on: ubuntu-latest
+    # Must stay above DEADLINE_SECONDS in .github/scripts/review.py (480s) plus checkout/publish margin.
+    timeout-minutes: 12
     permissions:
       contents: read
       pull-requests: write
@@ -17,3 +19,5 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_API_URL: ${{ github.api_url }}
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_BASE_URL: ${{ vars.AI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai' }}
+          AI_MODELS: ${{ vars.AI_MODELS || 'gemini-3.7-flash,gemini-3.5-flash,gemini-3.5-flash-lite' }}
