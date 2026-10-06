@@ -15,12 +15,20 @@ from review import (
     Coverage,
     Deadline,
     Finding,
+    PriorFinding,
+    Resolution,
     build_chunks,
     candidate_from,
     finder_messages,
     new_side_ranges,
     parse_findings,
+    parse_published_findings,
+    parse_resolution,
     render_review_body,
+    render_prior_section,
+    render_finding,
+    resolution_messages,
+    resolve_prior_findings,
     review_event,
     run_review,
     skip_reason,
@@ -60,17 +68,20 @@ class FakeClock:
 
 
 class Scripted:
-    """Test double dispatching on the system prompt: finder vs verifier.
+    """Test double dispatching on the system prompt: finder vs verifier vs resolver.
 
     Scripts values or RuntimeErrors in order per channel.
     """
 
     def __init__(self, finder: list[object], verifier: list[object] | None = None,
+                 resolver: list[object] | None = None,
                  bump: Callable[[], None] | None = None):
         self.finder_scripts = list(finder)
         self.verifier_scripts = list(verifier or [])
+        self.resolver_scripts = list(resolver or [])
         self.finder_calls = 0
         self.verifier_calls = 0
+        self.resolver_calls = 0
         self.bump = bump
 
     def __call__(self, messages: list[dict[str, str]]) -> object:
@@ -79,6 +90,9 @@ class Scripted:
         if 'verify one candidate' in messages[0]['content']:
             self.verifier_calls += 1
             item = self.verifier_scripts.pop(0)
+        elif 'adjudicate one prior review finding' in messages[0]['content']:
+            self.resolver_calls += 1
+            item = self.resolver_scripts.pop(0)
         else:
             self.finder_calls += 1
             item = self.finder_scripts.pop(0)
@@ -576,6 +590,192 @@ class TestCandidateGate(unittest.TestCase):
         self.assertEqual(1, cand.line if cand else 0)
         self.assertIsNone(candidate_from({'path': 'other.ts', 'line': 1}, chunk))
         self.assertIsNone(candidate_from({'path': 'src/a.ts', 'line': True}, chunk))
+
+
+def prior_finding(path: str = 'src/a.ts', line: int = 1, title: str = 't',
+                  severity: str = 'bug', verdict: str = 'CONFIRMED') -> PriorFinding:
+    block = (f'**`{path}:{line}` — {title}** `[{severity}/{verdict}]`\n'
+             '- Trigger: concrete input\n- Effect: wrong result\n'
+             '- Mechanism: why it happens\n- Fix: minimal change')
+    return PriorFinding(path=path, line=line, title=title, severity=severity,
+                        verdict=verdict, block=block)
+
+
+def resolution(value: str, reason: str = 'checked') -> dict[str, object]:
+    return {'resolution': value, 'reason': reason}
+
+
+class TestPublishedFindingsParsing(unittest.TestCase):
+    def test_round_trip_through_render_finding(self):
+        cand = candidate_from(finding_dict('src/a.ts', 3, 'broken invariant', 'correctness'),
+                              build_chunks(section('src/a.ts', ['l1', 'l2', 'l3']))[0][0])
+        assert cand is not None
+        body = render_review_body([Finding(cand, 'bug', 'CONFIRMED', 'traced')], Coverage(), 'm')
+        parsed = parse_published_findings(body)
+        self.assertEqual(1, len(parsed))
+        f = parsed[0]
+        self.assertEqual('src/a.ts', f.path)
+        self.assertEqual(3, f.line)
+        self.assertEqual('broken invariant', f.title)
+        self.assertEqual('bug', f.severity)
+        self.assertEqual('CONFIRMED', f.verdict)
+        self.assertIn('- Trigger: concrete input', f.block)
+
+    def test_unparseable_body_yields_nothing(self):
+        self.assertEqual([], parse_published_findings('## 👀 AI Code Review\n\nNo findings.'))
+        self.assertEqual([], parse_published_findings(''))
+        self.assertEqual([], parse_published_findings('**`no-line-number` — t** `[bug/x]`'))
+
+    def test_multiple_findings_and_trailing_sections(self):
+        body = ('## 👀 AI Code Review\n\n'
+                + render_finding(Finding(candidate_from(finding_dict('a.ts', 1), build_chunks(section('a.ts', ['x']))[0][0]), 'bug', 'CONFIRMED'))
+                + '\n'
+                + render_finding(Finding(candidate_from(finding_dict('b.ts', 9), build_chunks(section('b.ts', ['y'] * 9))[0][0]), 'nit', 'PLAUSIBLE'))
+                + '\n\n---\n*Powered by m*')
+        parsed = parse_published_findings(body)
+        self.assertEqual(2, len(parsed))
+        self.assertEqual(('a.ts', 1, 'bug'), (parsed[0].path, parsed[0].line, parsed[0].severity))
+        self.assertEqual(('b.ts', 9, 'nit'), (parsed[1].path, parsed[1].line, parsed[1].severity))
+
+
+class TestResolutionVerdicts(unittest.TestCase):
+    def test_schema_strict(self):
+        self.assertEqual(('WITHDRAWN', 'r'), parse_resolution(resolution('WITHDRAWN', 'r')))
+        self.assertEqual(('STANDS', 'r'), parse_resolution(resolution('STANDS', 'r')))
+        self.assertIsNone(parse_resolution({'resolution': 'REFUTED', 'reason': 'r'}))
+        self.assertIsNone(parse_resolution({'resolution': 'WITHDRAWN'}))
+        self.assertIsNone(parse_resolution({'resolution': 'WITHDRAWN', 'reason': '  '}))
+        self.assertIsNone(parse_resolution('WITHDRAWN'))
+        self.assertIsNone(parse_resolution(None))
+
+    def test_withdrawn_bug_clears_the_block(self):
+        self.assertEqual('APPROVE', review_event([], Coverage(), standing_prior_bugs=False))
+        self.assertEqual('REQUEST_CHANGES', review_event([], Coverage(), standing_prior_bugs=True))
+        self.assertEqual('COMMENT', review_event([], Coverage(failed_chunks=[0]), standing_prior_bugs=False))
+
+    def test_uncontested_same_head_stands_without_model_call(self):
+        budget = Budget()
+        scripted = Scripted(finder=[], resolver=[])
+        resolutions = resolve_prior_findings(
+            [prior_finding()], [], scripted, NeverExpires(), budget,
+            fetch_context=None, head_changed=False, current_paths={'src/a.ts'})
+        self.assertEqual(1, len(resolutions))
+        self.assertEqual('STANDS', resolutions[0].status)
+        self.assertEqual(0, scripted.resolver_calls)
+        self.assertFalse(resolutions[0].contested)
+
+    def test_convincing_rebuttal_withdraws(self):
+        budget = Budget()
+        scripted = Scripted(finder=[], resolver=[resolution('WITHDRAWN', 'type is the object, not string[]')])
+        resolutions = resolve_prior_findings(
+            [prior_finding()], [{'source': 'issue', 'id': '1', 'author': 'a', 'body': 'rebuttal'}],
+            scripted, NeverExpires(), budget,
+            fetch_context=lambda path, line: 'code', head_changed=False, current_paths={'src/a.ts'})
+        self.assertEqual('WITHDRAWN', resolutions[0].status)
+        self.assertEqual(1, scripted.resolver_calls)
+        self.assertTrue(resolutions[0].contested)
+
+    def test_malformed_or_failed_resolution_stands(self):
+        budget = Budget()
+        scripted = Scripted(finder=[], resolver=['garbage', RuntimeError('model down')])
+        resolutions = resolve_prior_findings(
+            [prior_finding(), prior_finding(line=2, title='t2')],
+            [{'source': 'issue', 'id': '1', 'author': 'a', 'body': 'rebuttal'}],
+            scripted, NeverExpires(), budget,
+            fetch_context=lambda path, line: 'code', head_changed=False, current_paths={'src/a.ts'})
+        self.assertEqual(['STANDS', 'STANDS'], [r.status for r in resolutions])
+        self.assertEqual(2, scripted.resolver_calls)
+
+    def test_outdated_when_path_left_the_diff(self):
+        budget = Budget()
+        scripted = Scripted(finder=[], resolver=[])
+        resolutions = resolve_prior_findings(
+            [prior_finding(path='gone.ts')], [], scripted, NeverExpires(), budget,
+            fetch_context=None, head_changed=True, current_paths={'src/a.ts'})
+        self.assertEqual('OUTDATED', resolutions[0].status)
+        self.assertEqual(0, scripted.resolver_calls)
+
+    def test_moved_head_reverifies_uncontested_findings(self):
+        budget = Budget()
+        scripted = Scripted(finder=[], resolver=[resolution('STANDS', 'still present')])
+        resolutions = resolve_prior_findings(
+            [prior_finding()], [], scripted, NeverExpires(), budget,
+            fetch_context=lambda path, line: 'code', head_changed=True, current_paths={'src/a.ts'})
+        self.assertEqual('STANDS', resolutions[0].status)
+        self.assertEqual(1, scripted.resolver_calls)
+
+    def test_resolution_budget_caps_calls(self):
+        budget = Budget(max_resolutions=1)
+        scripted = Scripted(finder=[], resolver=[resolution('WITHDRAWN', 'ok')])
+        resolutions = resolve_prior_findings(
+            [prior_finding(), prior_finding(line=2, title='t2')],
+            [{'source': 'issue', 'id': '1', 'author': 'a', 'body': 'rebuttal'}],
+            scripted, NeverExpires(), budget,
+            fetch_context=lambda path, line: 'code', head_changed=False, current_paths={'src/a.ts'})
+        self.assertEqual('WITHDRAWN', resolutions[0].status)
+        self.assertEqual('STANDS', resolutions[1].status)
+        self.assertEqual('resolution budget reached', resolutions[1].reason)
+        self.assertEqual(1, scripted.resolver_calls)
+
+    def test_deadline_stops_resolution(self):
+        class Expired(Deadline):
+            def __init__(self) -> None:
+                super().__init__(seconds=0, now=lambda: 0.0)
+
+            def expired(self) -> bool:
+                return True
+
+        budget = Budget()
+        scripted = Scripted(finder=[], resolver=[])
+        resolutions = resolve_prior_findings(
+            [prior_finding()], [{'source': 'issue', 'id': '1', 'author': 'a', 'body': 'rebuttal'}],
+            scripted, Expired(), budget,
+            fetch_context=lambda path, line: 'code', head_changed=False, current_paths={'src/a.ts'})
+        self.assertEqual('STANDS', resolutions[0].status)
+        self.assertEqual('deadline reached', resolutions[0].reason)
+        self.assertEqual(0, scripted.resolver_calls)
+
+
+class TestPriorRendering(unittest.TestCase):
+    def test_prior_sections_render(self):
+        prior = [
+            Resolution(prior_finding(), 'WITHDRAWN', 'rebuttal verified', True),
+            Resolution(prior_finding(line=5, title='u'), 'STANDS', 'rebuttal unconvincing', True),
+            Resolution(prior_finding(line=9, title='v', severity='nit'), 'OUTDATED', 'file left the diff', False),
+        ]
+        parts = render_prior_section(prior)
+        text = '\n'.join(parts)
+        self.assertIn('### Prior findings', text)
+        self.assertIn('withdrawn: rebuttal verified', text)
+        self.assertIn('stands: rebuttal unconvincing', text)
+        self.assertIn('[prior bug/CONFIRMED]', text)
+        self.assertIn('outdated: file left the diff', text)
+
+    def test_clean_line_suppressed_when_prior_stands(self):
+        prior = [Resolution(prior_finding(), 'STANDS', 'no rebuttal', False)]
+        body = render_review_body([], Coverage(), 'm', prior=prior)
+        self.assertNotIn('No correctness or security findings.', body)
+        self.assertIn('stands: no rebuttal', body)
+
+    def test_clean_line_prints_when_all_withdrawn(self):
+        prior = [Resolution(prior_finding(), 'WITHDRAWN', 'rebuttal verified', True)]
+        body = render_review_body([], Coverage(), 'm', prior=prior)
+        self.assertIn('No correctness or security findings.', body)
+        self.assertIn('withdrawn: rebuttal verified', body)
+
+    def test_carried_incomplete_blocks_clean_verdict(self):
+        coverage = Coverage(carried_incomplete=True)
+        self.assertFalse(coverage.complete())
+        self.assertIn('prior review of this commit reported incomplete coverage', '; '.join(coverage.reasons()))
+        body = render_review_body([], coverage, 'm')
+        self.assertNotIn('No correctness or security findings.', body)
+        self.assertIn('*Review coverage incomplete:', body)
+
+    def test_resolution_prompt_carries_untrusted_guard(self):
+        messages = resolution_messages(prior_finding(), ['author claim'], 'code')
+        self.assertIn('UNTRUSTED', messages[0]['content'])
+        self.assertIn('adjudicate one prior review finding', messages[0]['content'])
+        self.assertIn('author claim', messages[1]['content'])
 
 
 if __name__ == '__main__':
