@@ -83,10 +83,14 @@ function getCommandText(command: Command): string {
 
 function normalizeRedirect(redirect: Redirect, source: string | null): RedirectInfo {
   const heredoc = redirect.operator === "<<" || redirect.operator === "<<-";
-  const rawTarget = redirect.target
-    ? (source?.slice(redirect.target.pos, redirect.target.end) ?? redirect.target.text)
-    : heredoc
-      ? ""
+  // unbash gives heredoc delimiters a degenerate source range (pos === end), so the
+  // raw spelling is recovered from the redirect header "[fd] operator whitespace word".
+  const rawTarget = heredoc
+    ? source === null
+      ? (redirect.target?.text ?? "")
+      : source.slice(redirect.pos, redirect.end).replace(/^\d*<{1,2}-?/, "").trim()
+    : redirect.target
+      ? (source?.slice(redirect.target.pos, redirect.target.end) ?? redirect.target.text)
       : (redirect.content ?? "");
   const targetValue = redirect.target ? (heredoc ? redirect.target.value : staticWordValue(redirect.target)) : rawTarget;
   const target = targetValue ?? rawTarget;

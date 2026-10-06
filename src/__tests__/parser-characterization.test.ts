@@ -168,6 +168,40 @@ describe("characterization: redirects", () => {
     });
   });
 
+  it("keeps the raw spelling of a double-quoted heredoc delimiter", () => {
+    const result = parseChain('cat <<"EOF"\nbody\nEOF');
+    expect(result.invocations[0]?.redirects[0]).toMatchObject({
+      operator: "<<",
+      target: "EOF",
+      rawTarget: '"EOF"',
+      targetValue: "EOF",
+      wellKnown: true,
+    });
+  });
+
+  it("keeps a dash heredoc delimiter separate from its operator", () => {
+    const result = parseChain("cat <<-EOF\n\tbody\nEOF");
+    expect(result.invocations[0]?.redirects[0]).toMatchObject({
+      operator: "<<-",
+      target: "EOF",
+      rawTarget: "EOF",
+      targetValue: "EOF",
+      wellKnown: true,
+    });
+  });
+
+  it("keeps a descriptor heredoc delimiter free of the operator spelling", () => {
+    const result = parseChain("cat 2<<EOF\nbody\nEOF");
+    expect(result.invocations[0]?.redirects[0]).toMatchObject({
+      operator: "<<",
+      fileDescriptor: 2,
+      target: "EOF",
+      rawTarget: "EOF",
+      targetValue: "EOF",
+      wellKnown: true,
+    });
+  });
+
   it("file redirect is not well-known", () => {
     const result = parseChain("ls -la > /tmp/out.txt");
     expect(result.invocations[0].redirects[0]).toEqual({
