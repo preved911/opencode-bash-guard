@@ -14,6 +14,22 @@ export interface ExternalDirectoryRule {
 
 export type PermissionAction = "allow" | "ask" | "deny";
 
+/**
+ * Normalized inline external check. Produced only from user-global plugin config;
+ * a normalized check replaces the matcher's fixed action — a matcher carries
+ * exactly one of `action` or `check`.
+ */
+export interface NormalizedCheck {
+  /** Absolute argv: `command[0]` is an absolute executable (or interpreter) path. */
+  command: string[];
+  onPass: PermissionAction;
+  onFail: PermissionAction;
+  /** `ask` or `deny` only; normalized to `ask` when omitted. */
+  onError: "ask" | "deny";
+  /** Bounded per-check timeout in milliseconds (1–30000); defaults to 5000. */
+  timeoutMs: number;
+}
+
 export interface ArgMatcher {
   token?: string | string[];
   position?: number | "all";
@@ -21,7 +37,15 @@ export interface ArgMatcher {
   pattern?: string;
   /** Path-scoped value predicates (array-token matchers only): base flag → value glob. */
   flagValues?: Record<string, string>;
-  action: PermissionAction;
+  /** Fixed action — mutually exclusive with `check`. Optional only on checked matchers. */
+  action?: PermissionAction;
+  /** Normalized inline external check — mutually exclusive with `action`. */
+  check?: NormalizedCheck;
+  /**
+   * Deterministic identity `tool:<effective-entry-index>/matcher:<matcher-index>`,
+   * assigned to every normalized matcher after config precedence resolution.
+   */
+  ruleId?: string;
 }
 
 export interface ToolPermissionEntry {
@@ -355,6 +379,11 @@ function parsePathElements(elements: string[]): { levels: string[]; predicates: 
 }
 
 function evalMatcher(matcher: ArgMatcher, views: SegmentViews): boolean {
+  // A checked matcher has no fixed action, so the action-derived quantifier
+  // ("allow" = every occurrence, "ask"/"deny" = at least one) cannot be inferred.
+  // Checked selectors use an action-free universal predicate: every candidate
+  // must satisfy the pattern and an empty candidate list does not match.
+  const universal = matcher.action === "allow" || matcher.check !== undefined;
   if (matcher.token !== undefined) {
     if (Array.isArray(matcher.token)) {
       const { levels, predicates } = parsePathElements(matcher.token);
@@ -372,12 +401,11 @@ function evalMatcher(matcher: ArgMatcher, views: SegmentViews): boolean {
         if (!views.flagOccurrences.some((occ) => tokenMatchesTarget(occ.base, p.base))) return false;
       }
       // Path-scoped value predicates (`flagValues`): position-independent value checks —
-      // each base flag must occur with a value glob-matching the configured glob
-      // (`allow` requires every occurrence; `ask`/`deny` require at least one).
+      // each base flag must occur with a value glob-matching the configured glob.
       for (const [base, glob] of Object.entries(matcher.flagValues ?? {})) {
         const occurrences = views.flagOccurrences.filter((occ) => occ.base === base);
         const withMatchingValue = occurrences.filter((occ) => occ.value !== undefined && matchTokenPattern(occ.value, glob));
-        if (matcher.action === "allow") {
+        if (universal) {
           if (occurrences.length === 0 || withMatchingValue.length !== occurrences.length) return false;
         } else if (withMatchingValue.length === 0) {
           return false;
@@ -388,12 +416,9 @@ function evalMatcher(matcher: ArgMatcher, views: SegmentViews): boolean {
 
     const token = matcher.token;
     if (matcher.pattern !== undefined) {
-      // Value matcher over a repeated flag: `allow` requires every occurrence's value
-      // to glob-match (an occurrence without a value fails the allow); `ask`/`deny`
-      // need at least one matching occurrence.
       const occurrences = views.flagOccurrences.filter((occ) => occ.base === token);
       const withMatchingValue = occurrences.filter((occ) => occ.value !== undefined && matchTokenPattern(occ.value, matcher.pattern!));
-      if (matcher.action === "allow") {
+      if (universal) {
         return occurrences.length > 0 && withMatchingValue.length === occurrences.length;
       }
       return withMatchingValue.length > 0;
@@ -408,7 +433,7 @@ function evalMatcher(matcher: ArgMatcher, views: SegmentViews): boolean {
     if (matcher.position === "all") {
       if (views.positionalList.length === 0) return false;
       const matched = views.positionalList.filter((token) => matchTokenPattern(token, matcher.pattern!));
-      if (matcher.action === "allow") {
+      if (universal) {
         return matched.length === views.positionalList.length;
       }
       return matched.length > 0;
@@ -420,7 +445,7 @@ function evalMatcher(matcher: ArgMatcher, views: SegmentViews): boolean {
   if (matcher.operand === "all") {
     if (views.safetyOperandList.length === 0) return false;
     const matched = views.safetyOperandList.filter((token) => matchTokenPattern(token, matcher.pattern!));
-    if (matcher.action === "allow") {
+    if (universal) {
       return matched.length === views.safetyOperandList.length;
     }
     return matched.length > 0;
@@ -439,6 +464,11 @@ function evalMatcher(matcher: ArgMatcher, views: SegmentViews): boolean {
  * matchers never refine each other.
  */
 function refines(a: ArgMatcher, b: ArgMatcher): boolean {
+  // A checked matcher has no fixed action to inherit, so it can neither refine
+  // nor be refined — checked matchers are incomparable with every action-bearing
+  // matcher and with each other (identical checked duplicates stay selected and
+  // execute independently).
+  if (a.check !== undefined || b.check !== undefined) return false;
   // Refinement applies only between two array path matchers — matcher kinds
   // (array paths, scalar non-flag tokens, scalar flag families, position,
   // operand) are mutually incomparable, so incomparable matches always
@@ -468,6 +498,7 @@ function refines(a: ArgMatcher, b: ArgMatcher): boolean {
  * incomparable (the ask cannot downgrade the deny).
  */
 function refinesScalarFamily(a: ArgMatcher, b: ArgMatcher): boolean {
+  if (a.check !== undefined || b.check !== undefined) return false;
   return (
     typeof a.token === "string" &&
     typeof b.token === "string" &&
@@ -478,15 +509,29 @@ function refinesScalarFamily(a: ArgMatcher, b: ArgMatcher): boolean {
   );
 }
 
+/** A checked matcher statically selected for execution: its normalized check plus deterministic rule ID. */
+export interface SelectedCheckWork {
+  ruleId: string;
+  check: NormalizedCheck;
+}
+
+export interface StaticContributions {
+  /** Fixed actions contributed by matched unchecked matchers (after refinement). */
+  actions: PermissionAction[];
+  /** Check work items from matched checked matchers (after refinement), in match order. */
+  checks: SelectedCheckWork[];
+}
+
 /**
  * Match a segment's argv tokens against tool permission entries.
  * Matching matchers refined by another matching matcher are discarded (refinement
- * picks the most precise description); the survivors — plus fail-safe `ask`
- * contributions from classification ambiguity — reduce most-restrictive-wins.
+ * picks the most precise description; checked matchers are never comparable and
+ * always survive). Returns fixed-action contributions and selected check work
+ * items separately — no check process is started here.
  */
-export function matchToolActions(argv: string[], entries: ToolPermissionEntry[]): PermissionAction[] {
+export function matchToolContributions(argv: string[], entries: ToolPermissionEntry[]): StaticContributions {
   const toolEntries = entries.filter((entry) => entry.tool === argv[0]);
-  if (toolEntries.length === 0) return [];
+  if (toolEntries.length === 0) return { actions: [], checks: [] };
 
   // Aggregate flag arity per executable: explicit `flags` tables first (equal-rank
   // conflicts resolve to the value-less reading), then inference from scalar value
@@ -522,7 +567,7 @@ export function matchToolActions(argv: string[], entries: ToolPermissionEntry[])
   for (const flag of inference) {
     if (arity[flag] === 0) {
       warnOnce(`arity-contradiction:${argv[0]}:${flag}`, `[opencode-bash-guard] Flag "${flag}" on tool "${argv[0]}" is declared value-less but has a value matcher — suspending args policy for this tool to ask.`);
-      return ["ask"];
+      return { actions: ["ask"], checks: [] };
     }
     arity[flag] = 1;
   }
@@ -535,18 +580,30 @@ export function matchToolActions(argv: string[], entries: ToolPermissionEntry[])
       if (evalMatcher(matcher, views)) matching.push(matcher);
     }
   }
-  const actions = matching
-    .filter(
-      (matcher) =>
-        !matching.some((other) => other !== matcher && (refines(other, matcher) || refinesScalarFamily(other, matcher))),
-    )
-    .map((matcher) => matcher.action);
+  const survivors = matching.filter(
+    (matcher) =>
+      !matching.some((other) => other !== matcher && (refines(other, matcher) || refinesScalarFamily(other, matcher))),
+  );
+
+  const actions: PermissionAction[] = [];
+  const checks: SelectedCheckWork[] = [];
+  for (const matcher of survivors) {
+    if (matcher.check !== undefined) {
+      checks.push({ ruleId: matcher.ruleId ?? "", check: matcher.check });
+    } else if (matcher.action !== undefined) {
+      actions.push(matcher.action);
+    }
+  }
 
   // Classification ambiguity (probable missing arity, `=`-form on a declared
   // value-less flag) always resolves to human review.
   if (views.segmentAsk) actions.push("ask");
 
-  return actions;
+  return { actions, checks };
+}
+
+export function matchToolActions(argv: string[], entries: ToolPermissionEntry[]): PermissionAction[] {
+  return matchToolContributions(argv, entries).actions;
 }
 
 export function mostRestrictive(actions: PermissionAction[]): PermissionAction | null {
@@ -572,7 +629,22 @@ export interface ValidatedPermissions {
   globalDegraded: boolean;
 }
 
-export function validateToolPermissions(raw: unknown, warn: (message: string) => void = (m) => console.warn(m)): ValidatedPermissions {
+export interface ValidatePermissionsOptions {
+  /**
+   * Inline checks are trusted local policy code: accepted only from the
+   * user-global plugin config source. When false (project source), a declared
+   * check degrades that matcher to a synthetic static `ask` with the same
+   * selector instead of producing a runnable check.
+   */
+  allowChecks?: boolean;
+}
+
+export function validateToolPermissions(
+  raw: unknown,
+  warn: (message: string) => void = (m) => console.warn(m),
+  options: ValidatePermissionsOptions = {},
+): ValidatedPermissions {
+  const allowChecks = options.allowChecks === true;
   const entries: ToolPermissionEntry[] = [];
   const forcedAskTools = new Set<string>();
   let globalDegraded = false;
@@ -593,11 +665,35 @@ export function validateToolPermissions(raw: unknown, warn: (message: string) =>
 
   const tokenIsNonFlag = (token: unknown): boolean => typeof token === "string" && !isFlagLike(token);
 
-  // Accepts the raw config shape (`action` optional) and returns the normalized matcher.
+  const normalizeCheck = (input: unknown): NormalizedCheck | null => {
+    if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+    const check = input as Record<string, unknown>;
+    const knownCheckFields = ["command", "onPass", "onFail", "onError", "timeoutMs"];
+    if (!Object.keys(check).every((key) => knownCheckFields.includes(key))) return null;
+    if (!Array.isArray(check.command) || check.command.length === 0) return null;
+    if (!check.command.every((member) => typeof member === "string")) return null;
+    const executable = check.command[0] as string;
+    if (!path.isAbsolute(executable)) return null;
+    if (!isValidAction(check.onPass) || !isValidAction(check.onFail)) return null;
+    let onError: "ask" | "deny" = "ask";
+    if (check.onError !== undefined) {
+      if (check.onError !== "ask" && check.onError !== "deny") return null;
+      onError = check.onError;
+    }
+    let timeoutMs = 5000;
+    if (check.timeoutMs !== undefined) {
+      if (typeof check.timeoutMs !== "number" || !Number.isInteger(check.timeoutMs) || check.timeoutMs < 1 || check.timeoutMs > 30000) return null;
+      timeoutMs = check.timeoutMs;
+    }
+    return { command: check.command as string[], onPass: check.onPass as PermissionAction, onFail: check.onFail as PermissionAction, onError, timeoutMs };
+  };
+
+  // Accepts the raw config shape (`action` optional, `check` optional) and returns
+  // the normalized matcher: exactly one of `action` or `check`.
   const normalizeMatcher = (input: unknown): ArgMatcher | null => {
     if (!input || typeof input !== "object" || Array.isArray(input)) return null;
-    const matcher = input as { token?: unknown; position?: unknown; operand?: unknown; pattern?: unknown; action?: unknown; args?: unknown; flagValues?: unknown };
-    const knownMatcherFields = ["token", "position", "operand", "pattern", "flagValues", "action"];
+    const matcher = input as { token?: unknown; position?: unknown; operand?: unknown; pattern?: unknown; action?: unknown; check?: unknown; args?: unknown; flagValues?: unknown };
+    const knownMatcherFields = ["token", "position", "operand", "pattern", "flagValues", "action", "check"];
     if (!Object.keys(matcher).every((key) => knownMatcherFields.includes(key))) return null;
     if (matcher.args !== undefined) return null; // legacy nested trees — removed, flatten to path arrays
     const hasToken = isValidToken(matcher.token);
@@ -619,17 +715,34 @@ export function validateToolPermissions(raw: unknown, warn: (message: string) =>
       const ok = Object.entries(table).every(([key, glob]) => isValidBaseFlagIdentity(key) && typeof glob === "string");
       if (!ok) return null;
     }
+
+    const selector = {
+      token: matcher.token as string | string[] | undefined,
+      position: matcher.position as number | "all" | undefined,
+      operand: matcher.operand as "all" | undefined,
+      pattern: matcher.pattern as string | undefined,
+      flagValues: matcher.flagValues as Record<string, string> | undefined,
+    };
+
+    if (matcher.check !== undefined && matcher.action !== undefined) return null;
+
+    if (matcher.check !== undefined) {
+      if (!allowChecks) {
+        // Project-sourced check: trusted-policy code may not come from project
+        // config. The valid selector survives as a synthetic static ask.
+        warn(`[opencode-bash-guard] Inline check ignored for tool matcher (checks are accepted only from the user-global config) — the matcher resolves to static ask.`);
+        return { ...selector, action: "ask" };
+      }
+      const normalized = normalizeCheck(matcher.check);
+      if (normalized === null) return null;
+      return { ...selector, check: normalized };
+    }
+
     if (matcher.action === undefined) {
-      return {
-        token: matcher.token as string | string[] | undefined,
-        position: matcher.position as number | "all" | undefined,
-        operand: matcher.operand as "all" | undefined,
-        pattern: matcher.pattern as string | undefined,
-        action: "ask",
-      };
+      return { ...selector, action: "ask" };
     }
     if (!isValidAction(matcher.action)) return null;
-    return matcher as ArgMatcher;
+    return { ...selector, action: matcher.action };
   };
 
   for (const item of raw) {
@@ -669,5 +782,10 @@ export function validateToolPermissions(raw: unknown, warn: (message: string) =>
     }
     entries.push({ tool: entry.tool, args: matchers, flags: entryFlags as Record<string, 0 | 1> | undefined });
   }
+  entries.forEach((entry, entryIndex) => {
+    entry.args.forEach((matcher, matcherIndex) => {
+      matcher.ruleId = `tool:${entryIndex}/matcher:${matcherIndex}`;
+    });
+  });
   return { entries, forcedAskTools: [...forcedAskTools], globalDegraded };
 }
