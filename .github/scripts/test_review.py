@@ -9,6 +9,7 @@ import unittest
 from collections.abc import Callable
 
 from review import (
+    Budget,
     Chunk,
     Coverage,
     Deadline,
@@ -57,18 +58,28 @@ class FakeClock:
 
 
 class Scripted:
-    """Test double for the model call; scripts values or RuntimeErrors in order."""
+    """Test double dispatching on the system prompt: finder vs verifier.
 
-    def __init__(self, finder: list[object], bump: Callable[[], None] | None = None):
+    Scripts values or RuntimeErrors in order per channel.
+    """
+
+    def __init__(self, finder: list[object], verifier: list[object] | None = None,
+                 bump: Callable[[], None] | None = None):
         self.finder_scripts = list(finder)
+        self.verifier_scripts = list(verifier or [])
         self.finder_calls = 0
+        self.verifier_calls = 0
         self.bump = bump
 
     def __call__(self, messages: list[dict[str, str]]) -> object:
-        self.finder_calls += 1
         if self.bump is not None:
             self.bump()
-        item = self.finder_scripts.pop(0)
+        if 'verify one candidate' in messages[0]['content']:
+            self.verifier_calls += 1
+            item = self.verifier_scripts.pop(0)
+        else:
+            self.finder_calls += 1
+            item = self.finder_scripts.pop(0)
         if isinstance(item, RuntimeError):
             raise item
         return item
@@ -79,6 +90,10 @@ def finding_dict(path: str = 'src/a.ts', line: int = 1, title: str = 't',
     return {'path': path, 'line': line, 'title': title, 'class': cls,
             'trigger': 'concrete input', 'effect': 'wrong result',
             'mechanism': 'why it happens', 'fix': 'minimal change'}
+
+
+def confirmed(**kw: object) -> dict[str, object]:
+    return {'verdict': 'CONFIRMED', 'reason': 'traced', 'confirmation': '', **kw}
 
 
 class TestChunking(unittest.TestCase):
@@ -216,8 +231,8 @@ class TestFinderRun(unittest.TestCase):
             {'findings': [finding_dict('f1.ts', 1, 't1')]},
             RuntimeError('model down'),
             {'findings': [finding_dict('f3.ts', 1, 't3', 'security')]},
-        ])
-        findings, coverage = run_review('t', 'b', chunks, scripted, NeverExpires())
+        ], verifier=[confirmed(), confirmed()])
+        findings, coverage = run_review('t', 'b', chunks, scripted, NeverExpires(), Budget())
         self.assertEqual(2, len(findings))
         self.assertEqual({'f1.ts', 'f3.ts'}, {f.candidate.path for f in findings})
         self.assertEqual([2], coverage.failed_chunks)
@@ -235,7 +250,8 @@ class TestFinderRun(unittest.TestCase):
             clock.t += 120  # every call pushes the clock past the 60s deadline
 
         scripted = Scripted([{'findings': []}, {'findings': []}], bump=bump)
-        findings, coverage = run_review('t', 'b', chunks, scripted, Deadline(seconds=60, now=clock))
+        findings, coverage = run_review(
+            't', 'b', chunks, scripted, Deadline(seconds=60, now=clock), Budget())
         self.assertEqual(1, scripted.finder_calls)
         self.assertEqual([2], coverage.unreviewed_chunks)
         self.assertFalse(coverage.complete())
@@ -261,9 +277,10 @@ class TestCoverageRendering(unittest.TestCase):
     def test_finding_renders_file_line(self):
         chunks, _, _ = build_chunks(section('src/a.ts', ['l1', 'l2']))
         found, _ = parse_findings({'findings': [finding_dict('src/a.ts', 2, 'off-by-one')]}, chunks[0])
-        body = render_review_body([Finding(found[0], 'bug')], Coverage(), 'm')
+        body = render_review_body([Finding(found[0], 'bug', 'CONFIRMED', 'traced')], Coverage(), 'm')
         self.assertIn('`src/a.ts:2`', body)
-        self.assertIn('[bug]', body)
+        self.assertIn('[bug/CONFIRMED]', body)
+        self.assertIn('- Verification: traced', body)
 
 
 class TestPrompts(unittest.TestCase):
@@ -294,6 +311,174 @@ class TestPrompts(unittest.TestCase):
         # The schema has no "summary" field: praise cannot become the review verdict.
         self.assertNotIn('"summary"', self.msgs[0]['content'])
         self.assertIn('Do NOT report', self.msgs[0]['content'])
+
+
+class TestVerification(unittest.TestCase):
+    """End-to-end orchestration with scripted finder and verifier responses."""
+
+    def one_chunk(self) -> list[Chunk]:
+        chunks, _, _ = build_chunks(section('src/a.ts', ['l1', 'l2', 'l3', 'l4']))
+        return chunks
+
+    def test_confirmed_finding_published_with_file_line(self):
+        chunks = self.one_chunk()
+        scripted = Scripted(
+            [{'findings': [finding_dict('src/a.ts', 2, 'off-by-one')]}],
+            verifier=[confirmed()])
+        findings, coverage = run_review('t', 'b', chunks, scripted, NeverExpires(), Budget())
+        self.assertTrue(coverage.complete())
+        self.assertEqual(1, len(findings))
+        self.assertEqual('src/a.ts', findings[0].candidate.path)
+        self.assertEqual(2, findings[0].candidate.line)
+        self.assertEqual('CONFIRMED', findings[0].verdict)
+        body = render_review_body(findings, coverage, 'm')
+        self.assertIn('`src/a.ts:2`', body)
+
+    def test_refuted_finding_not_published(self):
+        chunks = self.one_chunk()
+        scripted = Scripted(
+            [{'findings': [finding_dict(line=1)]}],
+            verifier=[{'verdict': 'REFUTED', 'reason': 'contradicts code', 'confirmation': ''}])
+        findings, coverage = run_review('t', 'b', chunks, scripted, NeverExpires(), Budget())
+        self.assertEqual([], findings)
+        self.assertTrue(coverage.complete())  # verified as not-a-finding is not a gap
+        body = render_review_body(findings, coverage, 'm')
+        self.assertIn('No correctness or security findings.', body)
+        self.assertNotIn('LGTM', body)
+
+    def test_plausible_requires_confirmation(self):
+        chunks = self.one_chunk()
+        base = [{'findings': [finding_dict(line=1)]}]
+        no_confirm = Scripted(
+            list(base),
+            verifier=[{'verdict': 'PLAUSIBLE', 'reason': 'race', 'confirmation': ''}])
+        findings, coverage = run_review('t', 'b', chunks, no_confirm, NeverExpires(), Budget())
+        self.assertEqual([], findings)
+        with_confirm = Scripted(
+            list(base),
+            verifier=[{'verdict': 'PLAUSIBLE', 'reason': 'race',
+                       'confirmation': 'run the CI job twice under load'}])
+        findings, coverage = run_review('t', 'b', chunks, with_confirm, NeverExpires(), Budget())
+        self.assertEqual(1, len(findings))
+        body = render_review_body(findings, coverage, 'm')
+        self.assertIn('To confirm:', body)
+        self.assertIn('run the CI job twice under load', body)
+
+    def test_verifier_garbage_marks_review_incomplete(self):
+        chunks = self.one_chunk()
+        scripted = Scripted(
+            [{'findings': [finding_dict(line=1)]}],
+            verifier=[{'verdict': 'MAYBE', 'reason': 'unsure'}])
+        findings, coverage = run_review('t', 'b', chunks, scripted, NeverExpires(), Budget())
+        self.assertEqual([], findings)
+        self.assertEqual(1, coverage.unverified)
+        self.assertFalse(coverage.complete())
+
+    def test_dedup_merges_duplicate_reports(self):
+        chunks = self.one_chunk()
+        scripted = Scripted(
+            [{'findings': [
+                finding_dict('src/a.ts', 2, 'Off by one!'),
+                finding_dict('src/a.ts', 3, 'off  by ONE'),
+            ]}],
+            verifier=[confirmed(), confirmed()])
+        findings, coverage = run_review('t', 'b', chunks, scripted, NeverExpires(), Budget())
+        self.assertEqual(1, len(findings))
+        self.assertEqual(2, findings[0].candidate.line)  # higher-priority first report kept
+        self.assertTrue(coverage.complete())
+
+    def test_verdict_never_praised(self):
+        chunks = self.one_chunk()
+        scripted = Scripted(
+            [{'summary': 'excellent PR!', 'findings': []}], verifier=[])
+        findings, coverage = run_review('t', 'b', chunks, scripted, NeverExpires(), Budget())
+        self.assertEqual([], findings)
+        body = render_review_body(findings, coverage, 'm')
+        self.assertNotIn('excellent PR!', body)
+
+
+class TestBudgets(unittest.TestCase):
+    def one_chunk(self) -> list[Chunk]:
+        chunks, _, _ = build_chunks(section('src/a.ts', ['l1', 'l2', 'l3', 'l4']))
+        return chunks
+
+    def test_verification_budget_stops_extra_calls(self):
+        chunks = self.one_chunk()
+        scripted = Scripted(
+            [{'findings': [finding_dict(line=1), finding_dict(line=2)]}],
+            verifier=[confirmed(), confirmed()])
+        budget = Budget(max_verify_calls=1)
+        findings, coverage = run_review('t', 'b', chunks, scripted, NeverExpires(), budget)
+        self.assertEqual(1, scripted.verifier_calls)
+        self.assertEqual(1, len(findings))
+        self.assertEqual(1, coverage.unverified)
+        self.assertFalse(coverage.complete())
+
+    def test_candidate_budget_drops_before_verification(self):
+        chunks = self.one_chunk()
+        scripted = Scripted(
+            [{'findings': [finding_dict(line=1), finding_dict(line=2)]}],
+            verifier=[confirmed()])
+        budget = Budget(max_candidates=1)
+        findings, coverage = run_review('t', 'b', chunks, scripted, NeverExpires(), budget)
+        self.assertEqual(1, scripted.verifier_calls)  # dropped candidate never verified
+        self.assertEqual(1, coverage.candidates_overflow)
+        self.assertEqual(1, len(findings))
+        self.assertFalse(coverage.complete())
+
+    def test_findings_cap_withholds_low_priority(self):
+        chunks = self.one_chunk()
+        scripted = Scripted(
+            [{'findings': [
+                finding_dict(line=1, cls='tests', title='missing test for parser'),
+                finding_dict(line=3, cls='security', title='unvalidated path join'),
+            ]}],
+            verifier=[confirmed(), confirmed()])
+        budget = Budget(max_findings=1)
+        findings, coverage = run_review('t', 'b', chunks, scripted, NeverExpires(), budget)
+        self.assertEqual(1, len(findings))
+        self.assertEqual('security', findings[0].candidate.finding_class)  # bug sorts first
+        self.assertEqual(1, coverage.withheld)
+
+    def test_deadline_during_verification_marks_unverified(self):
+        chunks = self.one_chunk()
+        clock = FakeClock()
+        scripted = Scripted(
+            [{'findings': [finding_dict(line=1), finding_dict(line=2)]}],
+            verifier=[confirmed(), confirmed()],
+            bump=lambda: setattr(clock, 't', clock.t + 10))
+        budget = Budget(max_verify_calls=10)
+        deadline = Deadline(seconds=15, now=clock)
+        findings, coverage = run_review('t', 'b', chunks, scripted, deadline, budget)
+        self.assertEqual(1, scripted.verifier_calls)
+        self.assertEqual(1, len(findings))
+        self.assertEqual(1, coverage.unverified)
+        self.assertTrue(coverage.deadline_hit)
+        self.assertFalse(coverage.complete())
+
+
+class TestVerifierPrompt(unittest.TestCase):
+    def test_verifier_receives_candidate_chunk_and_context(self):
+        from review import verifier_messages
+        chunks, _, _ = build_chunks(section('src/a.ts', ['l1', 'l2']))
+        found, _ = parse_findings({'findings': [finding_dict('src/a.ts', 1)]}, chunks[0])
+        msgs = verifier_messages(found[0], chunks[0], 'real file content')
+        system = msgs[0]['content']
+        self.assertIn('verify one candidate', system)
+        self.assertIn('UNTRUSTED DATA', system)
+        self.assertIn('REFUTED', system)
+        user = msgs[1]['content']
+        self.assertIn('"line": 1', user)
+        self.assertIn('real file content', user)
+        self.assertIn('```diff', user)
+
+    def test_verdict_parsing_is_strict(self):
+        from review import parse_verdict
+        self.assertIsNone(parse_verdict('nope'))
+        self.assertIsNone(parse_verdict({'verdict': 'MAYBE'}))
+        v = parse_verdict({'verdict': 'PLAUSIBLE', 'reason': 'race', 'confirmation': 'run twice'})
+        self.assertEqual('PLAUSIBLE', v.verdict if v else '')
+        self.assertEqual('run twice', v.confirmation if v else '')
 
 
 class TestCandidateGate(unittest.TestCase):
