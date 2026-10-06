@@ -14,12 +14,16 @@ import path from "path";
 
 export type ChainAction = "allow" | "ask" | "deny" | null;
 
+function isUnderCwd(resolvedPath: string, cwd: string): boolean {
+  return resolvedPath === cwd || resolvedPath.startsWith(cwd + path.sep);
+}
+
 function resolveRedirectTargets(targets: ExtractedPath[], cwd: string, config: PluginConfig): ChainAction {
   const actions: ChainAction[] = [];
 
   for (const target of targets) {
     const resolvedPath = target.resolved;
-    const underCwd = resolvedPath.startsWith(cwd + path.sep) || resolvedPath === cwd;
+    const underCwd = isUnderCwd(resolvedPath, cwd);
 
     const editAction = matchBashPermission(resolvedPath, config.editRules);
     if (editAction) actions.push(editAction);
@@ -75,8 +79,9 @@ export function resolveSegment(invocation: NormalizedInvocation, cwd: string, co
 
   let edAction: "ask" | "allow" | "deny" | null = requiresPathConfirmation ? "ask" : null;
 
+  // external_directory governs paths outside the working tree (same rule as redirects).
   for (const p of paths) {
-    if (p.requiresConfirmation) continue;
+    if (p.requiresConfirmation || isUnderCwd(p.resolved, cwd)) continue;
     const result = matchExternalDirectory(p.resolved, config.externalDirectoryRules, config.externalDirectoryDefault, cwd);
     if (result.violated && result.action) {
       if (result.action === "deny" || edAction !== "deny") {

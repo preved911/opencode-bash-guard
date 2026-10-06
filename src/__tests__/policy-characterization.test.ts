@@ -139,6 +139,29 @@ describe("characterization: external directory matching", () => {
   it("no match and no default → no violation", () => {
     expect(matchExternalDirectory("/etc/passwd", rules, null, "/project")).toEqual({ violated: false, action: null });
   });
+
+  it("cwd-relative rule never matches a path outside cwd", () => {
+    expect(matchExternalDirectory("/etc", [{ pattern: "./**", action: "allow" as const }], "ask", "/project")).toEqual({
+      violated: true,
+      action: "ask",
+    });
+    expect(matchExternalDirectory("/project-sibling/x", [{ pattern: "./**", action: "allow" as const }], "ask", "/project")).toEqual({
+      violated: true,
+      action: "ask",
+    });
+  });
+
+  it("globstar crosses separators in absolute path rules", () => {
+    const deepDeny = [{ pattern: "/home/**/secrets/**", action: "deny" as const }];
+    expect(matchExternalDirectory("/home/me/projects/secrets/key.pem", deepDeny, null, "/project")).toEqual({
+      violated: true,
+      action: "deny",
+    });
+    expect(matchExternalDirectory("/home/me/work/file.txt", [{ pattern: "/home/**", action: "allow" as const }], "ask", "/project")).toEqual({
+      violated: false,
+      action: null,
+    });
+  });
 });
 
 describe("characterization: args matcher semantics", () => {
@@ -406,6 +429,20 @@ describe("characterization: segment resolution (glob fallback + paths + redirect
       ...defaultConfig,
       bashRules: [{ pattern: "*", action: "ask" }],
       toolPermissions: [{ tool: "curl", args: [{ token: "-X", pattern: "GET", action: "allow" }], flags: { "-X": 1 } }],
+    };
+    const { action, allowFromArgsRule } = resolveSegment(inv("curl -X GET https://api.com"), "/project", config);
+    expect(action).toBe("allow");
+    expect(allowFromArgsRule).toBe(true);
+  });
+
+  it("args allow survives the default external policy for an operand inside cwd", () => {
+    const config: PluginConfig = {
+      bashRules: [{ pattern: "*", action: "ask" }],
+      editRules: [],
+      externalDirectoryRules: [],
+      externalDirectoryDefault: "ask",
+      toolPermissions: [{ tool: "curl", args: [{ token: "-X", pattern: "GET", action: "allow" }], flags: { "-X": 1 } }],
+      enabled: true,
     };
     const { action, allowFromArgsRule } = resolveSegment(inv("curl -X GET https://api.com"), "/project", config);
     expect(action).toBe("allow");

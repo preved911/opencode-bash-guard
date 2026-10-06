@@ -1,3 +1,5 @@
+import path from "path";
+
 export interface BashPermissionRule {
   pattern: string;
   action: "ask" | "allow" | "deny";
@@ -129,23 +131,30 @@ export function matchExternalDirectory(
 function matchPathAgainstPattern(filePath: string, pattern: string, cwd?: string): boolean {
   if (pattern === "*") return true;
 
-  if (pattern.startsWith("./") && cwd) {
-    const relative = filePath.startsWith(cwd) ? filePath.slice(cwd.length).replace(/^\//, "") : filePath;
-    const normalized = pattern.slice(2);
-    const regexStr = normalized
-      .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-      .replace(/\*\*/g, ".*")
-      .replace(/\*/g, "[^/]*");
-    const re = new RegExp(`^${regexStr}$`, "s");
+  // `./` patterns are cwd-relative: a path outside cwd never matches one and falls
+  // through to the remaining rules and the default action.
+  if (pattern.startsWith("./")) {
+    if (!cwd || !(filePath === cwd || filePath.startsWith(cwd + path.sep))) return false;
+    const relative = filePath === cwd ? "" : filePath.slice(cwd.length + path.sep.length);
+    const re = pathPatternRegExp(pattern.slice(2));
     return re.test(relative) || re.test(`${relative}/`);
   }
 
+  const re = pathPatternRegExp(pattern);
+  return re.test(filePath) || re.test(`${filePath}/`);
+}
+
+// `**` is swapped to a placeholder first so the single-`*` replacement cannot
+// corrupt the already-inserted `.*` segments (same idiom as `matchTokenPattern`).
+function pathPatternRegExp(pattern: string): RegExp {
+  const GLOBSTAR = "\u0000";
   const regexStr = pattern
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*\*/g, ".*")
-    .replace(/\*/g, "[^/]*");
-  const re = new RegExp(`^${regexStr}$`, "s");
-  return re.test(filePath) || re.test(`${filePath}/`);
+    .replace(/\*\*/g, GLOBSTAR)
+    .replace(/\*/g, "[^/]*")
+    .split(GLOBSTAR)
+    .join(".*");
+  return new RegExp(`^${regexStr}$`, "s");
 }
 
 function globMatch(str: string, pattern: string): boolean {

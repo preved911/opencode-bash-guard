@@ -483,6 +483,9 @@ describe("flag-level pipeline", () => {
       { pattern: "*", action: "ask" },
       { pattern: "find *", action: "allow" },
     ],
+    // The scenario pins args-vs-glob precedence; the external_directory policy is
+    // out of scope here (/tmp sits outside cwd and would otherwise default to ask).
+    externalDirectoryDefault: null,
     toolPermissions: [{ tool: "find", args: [{ token: "-delete", action: "deny" }], flags: { "-name": 0 } }],
   };
 
