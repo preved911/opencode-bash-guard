@@ -116,14 +116,14 @@ def gh_api_raw(gh: GhCtx, path: str, accept: str) -> str | None:
     return text
 
 
-def gh_api(gh: GhCtx, path: str, data: dict[str, object] | None = None) -> object | None:
+def gh_api(gh: GhCtx, path: str, data: dict[str, object] | None = None, method: str | None = None) -> object | None:
     """Call the GitHub REST API expecting JSON. None on failure."""
     url = f'{gh.api}/repos/{gh.repo}{path}'
     headers = {'Authorization': f'Bearer {gh.token}', 'Accept': 'application/vnd.github+json'}
-    method = 'POST' if data is not None else 'GET'
-    status, text = http_request(url, headers=headers, data=data, method=method)
+    verb = method or ('POST' if data is not None else 'GET')
+    status, text = http_request(url, headers=headers, data=data, method=verb)
     if status not in (200, 201):
-        print(f'GitHub API error {status} for {method} {path}', file=sys.stderr)
+        print(f'GitHub API error {status} for {verb} {path}', file=sys.stderr)
         return None
     return json.loads(text)
 
@@ -898,7 +898,7 @@ def dismiss_prior_block(gh: GhCtx, pr_num: str, prior_review: dict[str, object],
         return False
     result = gh_api(gh, f'/pulls/{pr_num}/reviews/{review_id}/dismissals', data={
         'message': 'Superseded: the re-review withdrew or re-verified the findings of this review; '
-                   'see the latest review for the current verdict.'})
+                   'see the latest review for the current verdict.'}, method='PUT')
     if result is None:
         # A failed dismissal keeps the stale block visible; the new verdict is
         # still published below.
