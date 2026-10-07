@@ -697,13 +697,40 @@ def fetch_latest_bot_review(gh: GhCtx, pr_num: str) -> dict[str, object] | None:
         if isinstance(r, dict)
         and isinstance(r.get('user'), dict) and r['user'].get('type') == 'Bot'
         and isinstance(r.get('submitted_at'), str)
-        and r.get('state') in ('CHANGES_REQUESTED', 'COMMENTED', 'APPROVED')
+        and r.get('state') in ('CHANGES_REQUESTED', 'COMMENTED', 'APPROVED', 'DISMISSED')
         and isinstance(r.get('body'), str) and r['body'].strip()
     ]
     if not bot_reviews:
         return None
     bot_reviews.sort(key=lambda r: str(r['submitted_at']))
     return bot_reviews[-1]
+
+
+def fetch_stale_bot_blocks(gh: GhCtx, pr_num: str) -> list[dict[str, object]]:
+    """Every bot review still requesting changes: stale blocks to dismiss on a clean verdict."""
+    reviews = gh_api(gh, f'/pulls/{pr_num}/reviews?per_page=100')
+    if not isinstance(reviews, list):
+        return []
+    return [
+        r for r in reviews
+        if isinstance(r, dict)
+        and isinstance(r.get('user'), dict) and r['user'].get('type') == 'Bot'
+        and r.get('state') == 'CHANGES_REQUESTED'
+        and isinstance(r.get('id'), int)
+    ]
+
+
+def dedupe_prior_findings(prior: list[PriorFinding]) -> list[PriorFinding]:
+    """Drop carried duplicates: a finding published top-level and again as a
+    standing prior entry is one issue and must be adjudicated once."""
+    kept: list[PriorFinding] = []
+    for finding in prior:
+        if any(f.path == finding.path and abs(f.line - finding.line) <= 3
+               and _norm_title(f.title) == _norm_title(finding.title)
+               for f in kept):
+            continue
+        kept.append(finding)
+    return kept
 
 
 def fetch_author_replies(gh: GhCtx, pr_num: str, since_iso: str) -> list[dict[str, str]]:
@@ -846,6 +873,39 @@ def review_event(findings: list[Finding], coverage: Coverage, standing_prior_bug
     if any(f.severity == 'bug' for f in findings) or standing_prior_bugs:
         return 'REQUEST_CHANGES'
     return 'APPROVE' if coverage.complete() else 'COMMENT'
+
+
+def should_dismiss_prior_block(prior_state: str | None, event: str) -> bool:
+    """A stale blocking review must not outlive its refuted findings.
+
+    GITHUB_TOKEN cannot submit APPROVE reviews, so dismissal is the reliable
+    way for the bot to clear its own earlier block once the re-review verdict
+    is no longer blocking.
+    """
+    return prior_state == 'CHANGES_REQUESTED' and event != 'REQUEST_CHANGES'
+
+
+def dismiss_prior_block(gh: GhCtx, pr_num: str, prior_review: dict[str, object], event: str) -> bool:
+    if not should_dismiss_prior_block(str(prior_review.get('state') or ''), event):
+        return False
+    review_id = prior_review.get('id')
+    if not isinstance(review_id, int):
+        return False
+    result = gh_api(gh, f'/pulls/{pr_num}/reviews/{review_id}/dismissals', data={
+        'message': 'Superseded: the re-review withdrew or re-verified the findings of this review; '
+                   'see the latest review for the current verdict.'})
+    if result is None:
+        # A failed dismissal keeps the stale block visible; the new verdict is
+        # still published below.
+        print('Dismissing the prior blocking review failed — the block may persist.', file=sys.stderr)
+        return False
+    print(f'Dismissed prior blocking review #{review_id}')
+    return True
+
+
+def dismiss_stale_blocks(gh: GhCtx, pr_num: str, event: str) -> None:
+    for review in fetch_stale_bot_blocks(gh, pr_num):
+        dismiss_prior_block(gh, pr_num, review, event)
 
 
 def render_prior_section(resolutions: list[Resolution]) -> list[str]:
@@ -1230,7 +1290,7 @@ def main() -> None:
     head_changed = True
     if prior_review is not None:
         prior_body = str(prior_review.get('body', ''))
-        prior_findings = parse_published_findings(prior_body)
+        prior_findings = dedupe_prior_findings(parse_published_findings(prior_body))
         prior_incomplete = prior_coverage_incomplete(prior_body)
         replies = fetch_author_replies(gh, pr_num, str(prior_review['submitted_at']))
         head_changed = str(prior_review.get('commit_id') or '') != head_sha
@@ -1297,6 +1357,9 @@ def main() -> None:
     models_note = ', '.join(sorted(set(models_used))) if models_used else 'none'
     body_text = render_review_body(findings, coverage, models_note, prior=resolutions)
     event = review_event(findings, coverage, standing_prior_bugs)
+
+    if prior_review is not None:
+        dismiss_stale_blocks(gh, pr_num, event)
 
     if event == 'COMMENT' and not findings:
         # Nothing to anchor and nothing to unblock: a plain comment is enough.

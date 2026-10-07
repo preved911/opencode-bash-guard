@@ -30,7 +30,9 @@ from review import (
     render_prior_section,
     render_finding,
     resolution_messages,
+    dedupe_prior_findings,
     resolve_prior_findings,
+    should_dismiss_prior_block,
     _verify_candidates,
     review_event,
     run_review,
@@ -885,6 +887,36 @@ class TestDefinitions(unittest.TestCase):
                            fetch_context=None, coverage=Coverage(),
                            definitions={'SegmentCheckWork': 'the real interface'})
         self.assertIn('the real interface', captured[0][1]['content'])
+
+
+class TestPriorBlockDismissal(unittest.TestCase):
+    def test_stale_block_dismissed_on_non_blocking_verdict(self):
+        self.assertTrue(should_dismiss_prior_block('CHANGES_REQUESTED', 'APPROVE'))
+        self.assertTrue(should_dismiss_prior_block('CHANGES_REQUESTED', 'COMMENT'))
+
+    def test_block_kept_while_verdict_blocks(self):
+        self.assertFalse(should_dismiss_prior_block('CHANGES_REQUESTED', 'REQUEST_CHANGES'))
+
+    def test_non_blocking_prior_needs_no_dismissal(self):
+        self.assertFalse(should_dismiss_prior_block('APPROVED', 'APPROVE'))
+        self.assertFalse(should_dismiss_prior_block('COMMENTED', 'COMMENT'))
+        self.assertFalse(should_dismiss_prior_block(None, 'APPROVE'))
+
+
+class TestPriorDedup(unittest.TestCase):
+    def test_top_level_and_carried_duplicate_adjudicated_once(self):
+        top = prior_finding(path='src/external-check.ts', line=84, title='Accessing undefined properties on work.command')
+        carried = prior_finding(path='src/external-check.ts', line=84, title='Accessing undefined properties on work.command')
+        other = prior_finding(path='README.md', line=197, title='Zero-width spaces', severity='nit')
+        kept = dedupe_prior_findings([top, carried, other])
+        self.assertEqual(2, len(kept))
+        self.assertIs(top, kept[0])
+        self.assertIs(other, kept[1])
+
+    def test_distinct_findings_survive(self):
+        a = prior_finding(line=10, title='bug one')
+        b = prior_finding(line=400, title='bug two')
+        self.assertEqual(2, len(dedupe_prior_findings([a, b])))
 
 
 if __name__ == '__main__':
