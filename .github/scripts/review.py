@@ -662,9 +662,12 @@ def _prior_from_match(match: re.Match[str], block: list[str]) -> PriorFinding:
                         severity=severity, verdict=verdict, block='\n'.join(block))
 
 
-def parse_published_findings(body: str) -> list[PriorFinding]:
-    """Recover findings from a published review body; unparseable bodies yield [] (fail open to a fresh review)."""
-    findings: list[PriorFinding] = []
+def parse_published_findings(body: str) -> list[tuple[PriorFinding, str]]:
+    """Recover findings from a published review body with their status:
+    'active' (top-level publication or standing prior entry) or 'closed'
+    (withdrawn or outdated). Unparseable bodies yield [] (fail open to a
+    fresh review)."""
+    findings: list[tuple[PriorFinding, str]] = []
     top_header: re.Match[str] | None = None
     top_block: list[str] = []
     prior_entry: re.Match[str] | None = None
@@ -673,13 +676,13 @@ def parse_published_findings(body: str) -> list[PriorFinding]:
     def flush_top() -> None:
         nonlocal top_header, top_block
         if top_header is not None:
-            findings.append(_prior_from_match(top_header, top_block))
+            findings.append((_prior_from_match(top_header, top_block), 'active'))
             top_header, top_block = None, []
 
     def flush_prior() -> None:
         nonlocal prior_entry, prior_block
         if prior_entry is not None:
-            findings.append(_prior_from_match(prior_entry, prior_block))
+            findings.append((_prior_from_match(prior_entry, prior_block), 'active'))
             prior_entry, prior_block = None, []
 
     for line in body.splitlines():
@@ -697,9 +700,13 @@ def parse_published_findings(body: str) -> list[PriorFinding]:
             prior_entry, prior_block = prior_match, [line]
         elif final_match:
             # A withdrawn or outdated entry is final: close whatever was open
-            # and drop the entry with its details.
+            # and record the closed status.
             flush_prior()
             flush_top()
+            path, line, title = final_match.groups()[:3]
+            findings.append((PriorFinding(path=path, line=int(line), title=title,
+                                          severity='', verdict='',
+                                          block=line), 'closed'))
         elif detail_match and prior_entry is not None:
             prior_block.append(detail_match.group(1))
         elif top_header is not None:
@@ -715,10 +722,11 @@ def prior_coverage_incomplete(body: str) -> bool:
     return '*Review coverage incomplete:' in body
 
 
-def fetch_latest_bot_review(gh: GhCtx, pr_num: str) -> dict[str, object] | None:
+def fetch_bot_reviews(gh: GhCtx, pr_num: str) -> list[dict[str, object]]:
+    """Every bot review with a parseable body, oldest to newest."""
     reviews = gh_api(gh, f'/pulls/{pr_num}/reviews?per_page=100')
     if not isinstance(reviews, list):
-        return None
+        return []
     bot_reviews = [
         r for r in reviews
         if isinstance(r, dict)
@@ -727,10 +735,40 @@ def fetch_latest_bot_review(gh: GhCtx, pr_num: str) -> dict[str, object] | None:
         and r.get('state') in ('CHANGES_REQUESTED', 'COMMENTED', 'APPROVED', 'DISMISSED')
         and isinstance(r.get('body'), str) and r['body'].strip()
     ]
-    if not bot_reviews:
-        return None
     bot_reviews.sort(key=lambda r: str(r['submitted_at']))
-    return bot_reviews[-1]
+    return bot_reviews
+
+
+def fetch_latest_bot_review(gh: GhCtx, pr_num: str) -> dict[str, object] | None:
+    reviews = fetch_bot_reviews(gh, pr_num)
+    return reviews[-1] if reviews else None
+
+
+def collect_prior_findings(reviews: list[dict[str, object]]) -> list[PriorFinding]:
+    """Merge findings across ALL bot reviews, oldest to newest.
+
+    The latest publication of a finding wins (a newer statement supersedes an
+    older one); a withdrawn or outdated entry closes it; a later top-level or
+    standing re-publication reopens it. Only findings still active in the
+    newest state are returned — closed ones stay closed unless re-found.
+    """
+    state: list[dict[str, object]] = []
+    for review in reviews:
+        for finding, status in parse_published_findings(str(review.get('body', ''))):
+            match = next(
+                (s for s in state
+                 if s['finding'].path == finding.path and _titles_related(s['finding'].title, finding.title)),
+                None)
+            if status == 'closed':
+                if match is not None:
+                    match['active'] = False
+                continue
+            if match is not None:
+                match['finding'] = finding
+                match['active'] = True
+            else:
+                state.append({'finding': finding, 'active': True})
+    return [s['finding'] for s in state if s['active']]
 
 
 def fetch_stale_bot_blocks(gh: GhCtx, pr_num: str) -> list[dict[str, object]]:
@@ -745,19 +783,6 @@ def fetch_stale_bot_blocks(gh: GhCtx, pr_num: str) -> list[dict[str, object]]:
         and r.get('state') == 'CHANGES_REQUESTED'
         and isinstance(r.get('id'), int)
     ]
-
-
-def dedupe_prior_findings(prior: list[PriorFinding]) -> list[PriorFinding]:
-    """Drop carried duplicates: a finding published top-level and again as a
-    standing prior entry is one issue and must be adjudicated once."""
-    kept: list[PriorFinding] = []
-    for finding in prior:
-        if any(f.path == finding.path and abs(f.line - finding.line) <= 3
-               and _norm_title(f.title) == _norm_title(finding.title)
-               for f in kept):
-            continue
-        kept.append(finding)
-    return kept
 
 
 def fetch_author_replies(gh: GhCtx, pr_num: str, since_iso: str) -> list[dict[str, str]]:
@@ -1317,18 +1342,19 @@ def main() -> None:
     head_sha = head.get('sha') if isinstance(head, dict) else None
     head_sha = head_sha if isinstance(head_sha, str) else ''
 
-    # Re-review state: the bot's latest review, author replies since it, and
-    # whether the head moved. A rebuttal can withdraw a finding; a moved head
-    # re-verifies every prior finding against the current code.
-    prior_review = fetch_latest_bot_review(gh, pr_num)
+    # Re-review state: every bot review (the merged finding state spans all of
+    # them), the full human dialogue, and whether the head moved. A rebuttal
+    # can withdraw a finding; a moved head re-verifies every active prior
+    # finding against the current code.
+    bot_reviews = fetch_bot_reviews(gh, pr_num)
+    prior_review = bot_reviews[-1] if bot_reviews else None
     prior_findings: list[PriorFinding] = []
     replies: list[dict[str, str]] = []
     prior_incomplete = False
     head_changed = True
     if prior_review is not None:
-        prior_body = str(prior_review.get('body', ''))
-        prior_findings = dedupe_prior_findings(parse_published_findings(prior_body))
-        prior_incomplete = prior_coverage_incomplete(prior_body)
+        prior_findings = collect_prior_findings(bot_reviews)
+        prior_incomplete = prior_coverage_incomplete(str(prior_review.get('body', '')))
         replies = fetch_author_replies(gh, pr_num, str(prior_review['submitted_at']))
         head_changed = str(prior_review.get('commit_id') or '') != head_sha
         if not head_changed and not replies:

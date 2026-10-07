@@ -30,7 +30,7 @@ from review import (
     render_prior_section,
     render_finding,
     resolution_messages,
-    dedupe_prior_findings,
+    collect_prior_findings,
     plan_thread_actions,
     resolve_prior_findings,
     thread_matches,
@@ -630,7 +630,7 @@ class TestPublishedFindingsParsing(unittest.TestCase):
         body = render_review_body([Finding(cand, 'bug', 'CONFIRMED', 'traced')], Coverage(), 'm')
         parsed = parse_published_findings(body)
         self.assertEqual(1, len(parsed))
-        f = parsed[0]
+        f = parsed[0][0]
         self.assertEqual('src/a.ts', f.path)
         self.assertEqual(3, f.line)
         self.assertEqual('broken invariant', f.title)
@@ -650,14 +650,16 @@ class TestPublishedFindingsParsing(unittest.TestCase):
             '- Trigger: t\n\n'
             '### Prior findings\n\n'
             '- **`src/b.ts:5` — standing nit** `[prior nit/CONFIRMED]` — stands: rebuttal unconvincing\n'
-            '- **`src/c.ts:7` — resolved bug** `[prior bug/CONFIRMED]` — withdrawn: rebuttal verified\n'
-            '- **`src/d.ts:9` — moved bug** `[prior bug/CONFIRMED]` — outdated: file left the diff\n'
+            '- **`src/c.ts:7` — resolved bug** — withdrawn: rebuttal verified\n'
+            '- **`src/d.ts:9` — moved bug** — outdated: file left the diff\n'
         )
         parsed = parse_published_findings(body)
-        self.assertEqual(2, len(parsed))
-        self.assertEqual(('src/a.ts', 1), (parsed[0].path, parsed[0].line))
-        self.assertEqual(('src/b.ts', 5), (parsed[1].path, parsed[1].line))
-        self.assertEqual('nit', parsed[1].severity)
+        self.assertEqual(4, len(parsed))
+        self.assertEqual(('src/a.ts', 1, 'active'), (parsed[0][0].path, parsed[0][0].line, parsed[0][1]))
+        self.assertEqual(('src/b.ts', 5, 'active'), (parsed[1][0].path, parsed[1][0].line, parsed[1][1]))
+        self.assertEqual('nit', parsed[1][0].severity)
+        self.assertEqual(('src/c.ts', 7, 'closed'), (parsed[2][0].path, parsed[2][0].line, parsed[2][1]))
+        self.assertEqual(('src/d.ts', 9, 'closed'), (parsed[3][0].path, parsed[3][0].line, parsed[3][1]))
 
     def test_multiple_findings_and_trailing_sections(self):
         body = ('## 👀 AI Code Review\n\n'
@@ -667,8 +669,8 @@ class TestPublishedFindingsParsing(unittest.TestCase):
                 + '\n\n---\n*Powered by m*')
         parsed = parse_published_findings(body)
         self.assertEqual(2, len(parsed))
-        self.assertEqual(('a.ts', 1, 'bug'), (parsed[0].path, parsed[0].line, parsed[0].severity))
-        self.assertEqual(('b.ts', 9, 'nit'), (parsed[1].path, parsed[1].line, parsed[1].severity))
+        self.assertEqual(('a.ts', 1, 'bug'), (parsed[0][0].path, parsed[0][0].line, parsed[0][0].severity))
+        self.assertEqual(('b.ts', 9, 'nit'), (parsed[1][0].path, parsed[1][0].line, parsed[1][0].severity))
 
 
 class TestResolutionVerdicts(unittest.TestCase):
@@ -983,7 +985,7 @@ class TestPriorSubstanceCarry(unittest.TestCase):
         self.assertIn('    - Trigger: concrete input', body)
         parsed = parse_published_findings(body)
         self.assertEqual(1, len(parsed))
-        carried = parsed[0]
+        carried = parsed[0][0]
         self.assertEqual(('src/a.ts', 10), (carried.path, carried.line))
         self.assertIn('- Trigger: concrete input', carried.block)
         self.assertIn('- Mechanism: why it happens', carried.block)
@@ -996,25 +998,59 @@ class TestPriorSubstanceCarry(unittest.TestCase):
         ]
         body = render_review_body([], Coverage(), 'm', prior=resolutions)
         parsed = parse_published_findings(body)
-        self.assertEqual(1, len(parsed))
-        self.assertEqual('src/a.ts', parsed[0].path)
-        self.assertNotIn('other', parsed[0].block)
+        self.assertEqual(2, len(parsed))
+        self.assertEqual('src/a.ts', parsed[0][0].path)
+        self.assertNotIn('other', parsed[0][0].block)
+        self.assertEqual('closed', parsed[1][1])
 
 
-class TestPriorDedup(unittest.TestCase):
-    def test_top_level_and_carried_duplicate_adjudicated_once(self):
-        top = prior_finding(path='src/external-check.ts', line=84, title='Accessing undefined properties on work.command')
-        carried = prior_finding(path='src/external-check.ts', line=84, title='Accessing undefined properties on work.command')
-        other = prior_finding(path='README.md', line=197, title='Zero-width spaces', severity='nit')
-        kept = dedupe_prior_findings([top, carried, other])
-        self.assertEqual(2, len(kept))
-        self.assertIs(top, kept[0])
-        self.assertIs(other, kept[1])
+class TestCrossReviewMerge(unittest.TestCase):
+    def review(self, body: str) -> dict[str, object]:
+        return {'body': body}
 
-    def test_distinct_findings_survive(self):
-        a = prior_finding(line=10, title='bug one')
-        b = prior_finding(line=400, title='bug two')
-        self.assertEqual(2, len(dedupe_prior_findings([a, b])))
+    def test_older_publication_superseded_by_newer_statement(self):
+        reviews = [
+            self.review('**`src/a.ts:10` — Accessing undefined properties on work object** `[bug/CONFIRMED]`\n- Trigger: t\n'),
+            self.review('**`src/a.ts:12` — Accessing undefined properties on work command object** `[bug/CONFIRMED]`\n- Trigger: t2\n'),
+        ]
+        active = collect_prior_findings(reviews)
+        self.assertEqual(1, len(active))
+        self.assertEqual(12, active[0].line)
+        self.assertIn('command object', active[0].title)
+
+    def test_withdrawn_closes_and_republication_reopens(self):
+        reviews = [
+            self.review('**`src/a.ts:10` — bug** `[bug/CONFIRMED]`\n- Trigger: t\n'),
+            self.review('- **`src/a.ts:10` — bug** `[prior bug/CONFIRMED]` — withdrawn: refuted\n'),
+            self.review('**`src/a.ts:11` — bug** `[bug/CONFIRMED]`\n- Trigger: t\n'),
+        ]
+        active = collect_prior_findings(reviews)
+        self.assertEqual(1, len(active))
+        self.assertEqual(11, active[0].line)
+
+    def test_closed_without_prior_match_is_ignored(self):
+        active = collect_prior_findings([
+            self.review('- **`src/x.ts:3` — ghost** `[prior bug/CONFIRMED]` — withdrawn: refuted\n'),
+        ])
+        self.assertEqual([], active)
+
+    def test_distinct_findings_across_reviews_stay_active(self):
+        reviews = [
+            self.review('**`src/a.ts:10` — bug one** `[bug/CONFIRMED]`\n- Trigger: t\n'),
+            self.review('**`src/b.ts:20` — bug two** `[bug/CONFIRMED]`\n- Trigger: t\n'),
+        ]
+        active = collect_prior_findings(reviews)
+        self.assertEqual(2, len(active))
+        self.assertEqual({'src/a.ts', 'src/b.ts'}, {f.path for f in active})
+
+    def test_stands_entry_keeps_finding_active(self):
+        reviews = [
+            self.review('**`src/a.ts:10` — bug** `[bug/CONFIRMED]`\n- Trigger: t\n'),
+            self.review('- **`src/a.ts:10` — bug** `[prior bug/CONFIRMED]` — stands: traced\n'),
+        ]
+        active = collect_prior_findings(reviews)
+        self.assertEqual(1, len(active))
+        self.assertIn('stands: traced', active[0].block)
 
 
 if __name__ == '__main__':
