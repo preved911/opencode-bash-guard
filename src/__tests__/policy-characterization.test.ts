@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { parseConfig, matchBashPermission, matchExternalDirectory, matchToolPermissions, mostRestrictive } from "../config.js";
+import { parseConfig, matchBashPermission, matchExternalDirectory, matchToolPermissions, mostRestrictive, validateToolPermissions } from "../config.js";
 import { parseCommand as parseChain } from "../parser.js";
-import { resolveSegment, resolveChain } from "../policy.js";
+import { resolveSegment, resolveChain, planSegment } from "../policy.js";
 import type { PluginConfig } from "../config.js";
 import type { NormalizedInvocation } from "../parser.js";
 
@@ -501,5 +501,72 @@ describe("characterization: chain aggregation", () => {
     });
     expect(globChain.action).toBe("allow");
     expect(globChain.allowFromArgsRule).toBe(false);
+  });
+});
+
+describe("characterization: action-only rules keep pre-feature behavior through plan/finalize", () => {
+  const actionOnlyEntries = validateToolPermissions(
+    [
+      {
+        tool: "git",
+        args: [
+          { token: ["push"], action: "allow" },
+          { token: ["push", "--force"], action: "deny" },
+        ],
+        flags: { "--force": 0 },
+      },
+    ],
+    () => {},
+  ).entries;
+
+  const config: PluginConfig = {
+    bashRules: [
+      { pattern: "*", action: "ask" },
+      { pattern: "rm *", action: "deny" },
+    ],
+    editRules: [],
+    externalDirectoryRules: [{ pattern: "./**", action: "allow" }],
+    externalDirectoryDefault: "ask",
+    toolPermissions: actionOnlyEntries,
+    enabled: true,
+  };
+
+  it("classification and refinement: the specific path decides, the refined prefix is discarded", () => {
+    const allowed = resolveSegment(seg("git push"), "/project", config);
+    expect(allowed.action).toBe("allow");
+    expect(allowed.allowFromArgsRule).toBe(true);
+
+    const denied = resolveSegment(seg("git push --force"), "/project", config);
+    expect(denied.action).toBe("deny");
+
+    const unrelated = resolveSegment(seg("git log"), "/project", config);
+    expect(unrelated.action).toBe("ask");
+  });
+
+  it("forced scoped ask survives with action-only rules", () => {
+    const scoped: PluginConfig = { ...config, forcedAskTools: ["git"] };
+    expect(resolveSegment(seg("git push"), "/project", scoped).action).toBe("ask");
+  });
+
+  it("glob fallback applies when no args rule matches", () => {
+    expect(resolveSegment(seg("rm -rf /"), "/project", config).action).toBe("deny");
+    expect(resolveSegment(seg("unknown-tool"), "/project", config).action).toBe("ask");
+  });
+
+  it("chain reduction keeps deny > ask > allow", () => {
+    const mixed = resolveChain([seg("git push"), seg("rm -rf /")], "/project", config);
+    expect(mixed.action).toBe("deny");
+
+    const allAllowed = resolveChain([seg("git push"), seg("git push origin")], "/project", config);
+    expect(allAllowed.action).toBe("allow");
+    expect(allAllowed.allowFromArgsRule).toBe(true);
+  });
+
+  it("plans produce no check work items for action-only rules", () => {
+    for (const command of ["git push", "git push --force", "git log", "rm -rf /"]) {
+      const plan = planSegment(seg(command), config);
+      expect(plan.checks).toHaveLength(0);
+      expect(plan.forcedAsk).toBe(false);
+    }
   });
 });

@@ -221,3 +221,81 @@ describe("loadRestructureConfig", () => {
     }
   });
 });
+
+describe("parsePluginConfig: check provenance (user-global only)", () => {
+  const globalConfigWithCheck = JSON.stringify({
+    matcherVersion: 2,
+    permissions: [
+      {
+        tool: "git",
+        args: [
+          { token: ["push"], action: "allow" },
+          {
+            token: ["push", "--force"],
+            check: { command: ["/usr/local/bin/check-push"], onPass: "allow", onFail: "deny" },
+          },
+        ],
+      },
+    ],
+  });
+
+  it("user-global checks are accepted into the effective rules", () => {
+    const result = parsePluginConfig([file("global.jsonc", globalConfigWithCheck)]);
+    expect(result.degraded).toBe(false);
+    expect(result.forcedAskTools).toEqual([]);
+    expect(result.toolPermissions).toHaveLength(1);
+    const checked = result.toolPermissions[0].args[1];
+    expect(checked.check).toBeDefined();
+    expect(checked.check!.command).toEqual(["/usr/local/bin/check-push"]);
+    expect(checked.check!.onPass).toBe("allow");
+    expect(checked.check!.onFail).toBe("deny");
+    expect(checked.check!.onError).toBe("ask");
+    expect(checked.check!.timeoutMs).toBe(5000);
+    expect(checked.ruleId).toBe("tool:0/matcher:1");
+  });
+
+  it("project-sourced checks are rejected to a synthetic static ask", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = parsePluginConfig([
+      file("global.jsonc", JSON.stringify({ matcherVersion: 2, permissions: [] })),
+      file("project.jsonc", globalConfigWithCheck),
+    ]);
+    expect(result.degraded).toBe(false);
+    expect(result.forcedAskTools).toEqual([]);
+    const entry = result.toolPermissions[0];
+    const checked = entry.args[1];
+    expect(checked.check).toBeUndefined();
+    expect(checked.action).toBe("ask");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("user-global"));
+  });
+
+  it("ordinary project matchers remain valid alongside a rejected project check", () => {
+    const result = parsePluginConfig([
+      file("global.jsonc", JSON.stringify({ matcherVersion: 2, permissions: [] })),
+      file(
+        "project.jsonc",
+        JSON.stringify({
+          matcherVersion: 2,
+          permissions: [
+            {
+              tool: "git",
+              args: [
+                { token: ["push"], action: "allow" },
+                { token: ["push", "--force"], check: { command: ["/bin/check"], onPass: "deny", onFail: "ask" } },
+              ],
+            },
+          ],
+        }),
+      ),
+    ]);
+    expect(result.degraded).toBe(false);
+    expect(result.forcedAskTools).toEqual([]);
+    const entry = result.toolPermissions[0];
+    expect(entry.args).toHaveLength(2);
+    expect(entry.args[0].action).toBe("allow");
+    expect(entry.args[0].check).toBeUndefined();
+    expect(entry.args[1].action).toBe("ask");
+    expect(entry.args[1].check).toBeUndefined();
+    expect(entry.args[1].ruleId).toBe("tool:0/matcher:1");
+  });
+});

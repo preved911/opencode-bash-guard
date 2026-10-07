@@ -1035,10 +1035,18 @@ def request_review(
                 break
             timeout = min(60.0, remaining)
         request_body['model'] = model
-        status, text = http_request(f'{AI_BASE_URL}/chat/completions', headers={
-            'Authorization': f'Bearer {AI_API_KEY}',
-            'Content-Type': 'application/json',
-        }, data=request_body, method='POST', timeout=timeout)
+        try:
+            status, text = http_request(f'{AI_BASE_URL}/chat/completions', headers={
+                'Authorization': f'Bearer {AI_API_KEY}',
+                'Content-Type': 'application/json',
+            }, data=request_body, method='POST', timeout=timeout)
+        except Exception as e:
+            # A network-level failure (timeout, DNS, connection reset) is one
+            # failed attempt for this model: try the next model instead of
+            # crashing the pipeline outside its own error handling.
+            print(f'{model} request failed: {type(e).__name__}: {e}', file=sys.stderr)
+            last_status = None
+            continue
         if status == 200:
             try:
                 parsed = _extract_content(text)

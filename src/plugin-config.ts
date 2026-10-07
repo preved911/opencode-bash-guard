@@ -168,7 +168,14 @@ export function parsePluginConfig(files: PluginConfigFile[]): PluginFileConfig {
     maxDepth: resolveThreshold(raw.max_depth, DEFAULT_RESTRUCTURE_CONFIG.maxDepth, "max_depth"),
   };
 
-  const validated = validateToolPermissions(merged.permissions);
+  const validated = validateToolPermissions(
+    merged.permissions,
+    (m) => console.warn(m),
+    // Inline checks are trusted local policy code: accepted only when the
+    // effective `permissions` array comes from the user-global config file.
+    // The array itself overrides wholesale, so a single source flag suffices.
+    { allowChecks: permissionsSource === 0 },
+  );
   const forcedAskTools = new Set<string>(validated.forcedAskTools);
 
   // The matcherVersion marker is honored only from the source that contributes the

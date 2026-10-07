@@ -194,6 +194,77 @@ Fail-safe behavior:
 - Then set `"matcherVersion": 2` next to `permissions` — until then the affected executables resolve to `ask`.
 
 
+## External checks (optional, user-global only)
+
+A structured matcher can run a small, local **external check** instead of declaring a fixed action. The static matcher still selects the rule; when it matches, the guard spawns the configured checker and the check's result selects the matcher's outcome. This enables context-aware policies (branch name, repository state, dynamic worktree validation) without adding command-specific logic to the plugin.
+
+```jsonc
+{
+  "matcherVersion": 2,
+  "permissions": [
+    {
+      "tool": "vcs",
+      "args": [
+        {
+          "token": ["push"],
+          "check": {
+            "command": ["/usr/local/bin/check-push-context"],
+            "timeoutMs": 1000,
+            "onPass": "allow",
+            "onFail": "ask",
+            "onError": "ask"
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+Rules and limits:
+
+- **User-global config only** — checks are trusted local policy code and are accepted only from the global `opencode-bash-guard.jsonc`. A `check` in the project config is rejected: the matcher degrades to a synthetic static `ask` (same selector), and ordinary project matchers keep working.
+- **Exactly one of `action` or `check`** — a matcher declaring both is invalid and scopes its executable to `ask`.
+- `command` is a direct argv array; the executable (or interpreter) path **must be absolute**. Other members must be strings.
+- `onPass` / `onFail` are required: `allow`, `ask`, or `deny`. `onError` accepts only `ask` or `deny` and defaults to `ask` — checker failure can never widen access.
+- `timeoutMs` is an integer from 1 through 30000 and defaults to 5000.
+- At most **16 checks** run per guarded invocation (excess contributes `onError` without spawning), sequentially, under a **30-second invocation-wide budget**; each started check is clamped to the lesser of its timeout and the remaining budget.
+- A check runs only after its matcher statically matched. Unmatched rules never spawn anything, and rules without `check` behave exactly as before.
+
+### Version-1 request/response protocol
+
+The guard writes exactly one JSON request plus a newline to the checker's stdin, then closes it:
+
+```json
+{
+  "protocolVersion": 1,
+  "context": { "cwd": "/current/session/worktree", "sessionID": "…", "callID": "…" },
+  "command": { "raw": "vcs push", "executable": "vcs", "argv": ["push"] },
+  "match": { "ruleId": "tool:0/matcher:1" }
+}
+```
+
+`command.argv` contains only arguments after `command.executable`. `ruleId` is deterministic (`tool:<effective-entry-index>/matcher:<matcher-index>`, both zero-based, assigned after config precedence resolution). The working directory is resolved freshly from the session for every invocation — never cached or stored in configuration — so the same rule works unchanged across dynamic VCS worktrees.
+
+The checker answers with one JSON response on stdout:
+
+```json
+{ "protocolVersion": 1, "result": "pass", "facts": {} }
+```
+
+- `result` is exactly `pass` or `fail`; `facts` is optional (object, ≤ 16 KiB serialized UTF-8, nesting depth ≤ 8). `pass` maps to `onPass`, `fail` to `onFail`.
+- The response carries **no permission authority**: unknown fields, missing or extra fields, a returned permission action, an unsupported protocol version, or malformed JSON all select `onError`.
+- Execution failures — timeout, output breach, spawn failure, nonzero or signal exit, malformed output — also select `onError`.
+
+### Trust boundary and data handling
+
+- A checker is **trusted local code**, not a sandbox. It runs unsandboxed, in an **empty environment** (no inherited `PATH` or other variables), via direct argv with no shell — protect the executable and any interpreter/dependency paths it uses from untrusted modification, and avoid passing secrets in command arguments.
+- The checker receives the full normalized command and the current session worktree directory, and runs with that directory as its process `cwd`. It is not invoked through OpenCode tools, so it cannot recurse through the guard.
+- stdout is limited to 64 KiB and stderr to 8 KiB (UTF-8 bytes). On the first terminal condition — timeout, output breach, or exit — the runner stops waiting, closes stdin, sends `SIGTERM`, and force-kills after a 250 ms grace if the process remains alive.
+- Request context, stdout, stderr, and facts are validated and then **discarded**: nothing is logged, prompted, persisted, or used as policy input.
+- A check observes state **before** the guarded command runs: it is advisory policy evaluation over an invocation snapshot, not an atomic transaction. Files, branches, and targets can change between the check and the command (TOCTOU).
+
+
 ## Testing
 
 ```bash
@@ -206,6 +277,7 @@ All tests are in `src/__tests__/`. Run `npm run test:watch` during development.
 
 ## Known Limitations
 
+- **External checks are not a sandbox**: checkers are trusted local executables that run unsandboxed in an empty environment and observe state only before the guarded command runs (TOCTOU-limited); protect their paths and dependencies.
 - **Flag-level tokenization heuristics**: tokens starting with `-` are never variable-arity candidates (negative numbers, files named `-myfile` are invisible to `position: "all"`); a dash-less flag value counts as a positional slot (`find -name x.txt` → `x.txt`, `git -c key=val` → `key=val`); matching is case-sensitive (`-X` ≠ `-x`); key=value options are full tokens (`dd if=/dev/sda` needs pattern `if=/dev/**`). For value-sensitive commands prefer `token` + `pattern` (value) matchers, which consume flag values explicitly.
 - **Exception carving requires a refinement lineage** — a more specific rule overrides a broader one only when its path extends the other's (or a value `pattern` narrows a bare token); incomparable overlapping rules still collapse to the strictest action.
 - **Broken plugin config degrades to ask-everything**: if `opencode-bash-guard.jsonc` fails to parse, has a non-object root, or cannot be read for a reason other than not existing, args rules are off and glob allows are suspended — every bash command asks until the file is fixed (a config failure can never silently re-allow a restricted command, but unattended/CI sessions will stall on prompts).

@@ -7,9 +7,11 @@ Run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 
 import unittest
 from collections.abc import Callable
+from unittest import mock
 
 from review import (
     Budget,
+    request_review,
     Candidate,
     Chunk,
     Coverage,
@@ -1051,6 +1053,27 @@ class TestCrossReviewMerge(unittest.TestCase):
         active = collect_prior_findings(reviews)
         self.assertEqual(1, len(active))
         self.assertIn('stands: traced', active[0].block)
+
+
+class TestRequestReviewNetwork(unittest.TestCase):
+    def test_network_failure_falls_through_to_runtimeerror(self):
+        with mock.patch('review.http_request', side_effect=TimeoutError('read timed out')):
+            with self.assertRaises(RuntimeError):
+                request_review([{'role': 'user', 'content': 'x'}])
+
+    def test_each_model_gets_its_attempt_after_network_failure(self):
+        attempted: list[object] = []
+
+        def fail(url: str, headers: dict[str, str], data: dict[str, object] | None = None,
+                 method: str = 'GET', retries: int = 3, timeout: float = 60) -> tuple[int, str]:
+            assert data is not None
+            attempted.append(data['model'])
+            raise TimeoutError('read timed out')
+
+        with mock.patch('review.http_request', side_effect=fail):
+            with self.assertRaises(RuntimeError):
+                request_review([{'role': 'user', 'content': 'x'}])
+        self.assertEqual(2, len(attempted))
 
 
 if __name__ == '__main__':

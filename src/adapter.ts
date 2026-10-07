@@ -3,6 +3,8 @@ import type { Event } from "@opencode-ai/sdk";
 import { parseConfig } from "./config.js";
 import type { PluginConfig } from "./config.js";
 import { beforeExecute } from "./enforce.js";
+import type { EnforcementContext } from "./enforce.js";
+import { runExternalCheck } from "./external-check.js";
 import { loadPluginConfig } from "./plugin-config.js";
 
 /**
@@ -62,6 +64,13 @@ export type BashGuardHooks = Omit<Hooks, "dispose" | "event"> & {
 
 export type ReplyPermission = (input: PermissionReplyInput) => Promise<void>;
 
+/**
+ * Resolve the current session's runtime working directory (its worktree) at
+ * invocation time, or null when the lookup fails or exposes no directory.
+ * Implementations must fetch freshly per call; the result is never cached.
+ */
+export type ResolveSessionDirectory = (sessionID: string) => Promise<string | null>;
+
 interface ReplyDecision {
   readonly action: "allow" | "deny";
 }
@@ -70,7 +79,11 @@ const MAX_STORED_DECISIONS = 256;
 const STORE_SATURATED_MESSAGE =
   "[opencode-bash-guard] Decision store saturated — unable to record the deny decision, so the command is blocked (fail closed).";
 
-export function createBashGuardHooks(input: { readonly directory: string }, replyPermission: ReplyPermission): BashGuardHooks {
+export function createBashGuardHooks(
+  input: { readonly directory: string },
+  replyPermission: ReplyPermission,
+  resolveSessionDirectory: ResolveSessionDirectory,
+): BashGuardHooks {
   const fileConfig = loadPluginConfig(input.directory);
   const state: AdapterState = { nativeConfig: null };
   const decisions = new Map<string, ReplyDecision>();
@@ -137,11 +150,23 @@ export function createBashGuardHooks(input: { readonly directory: string }, repl
           : typeof nestedCommand === "string"
             ? nestedCommand
             : undefined;
-      const result = beforeExecute(
+      const enforcementContext: EnforcementContext = {
+        sessionID: toolInput.sessionID,
+        callID: toolInput.callID,
+        resolveCwd: async () => {
+          try {
+            return await resolveSessionDirectory(toolInput.sessionID);
+          } catch {
+            return null;
+          }
+        },
+        runCheck: runExternalCheck,
+      };
+      const result = await beforeExecute(
         toolInput.tool,
-        input.directory,
         command === undefined ? toolOutput.args : { command },
         state.nativeConfig,
+        enforcementContext,
         fileConfig.restructure,
         fileConfig.degraded,
       );
