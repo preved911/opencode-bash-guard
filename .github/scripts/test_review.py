@@ -31,7 +31,9 @@ from review import (
     render_finding,
     resolution_messages,
     dedupe_prior_findings,
+    plan_thread_actions,
     resolve_prior_findings,
+    thread_matches,
     should_dismiss_prior_block,
     _verify_candidates,
     review_event,
@@ -901,6 +903,102 @@ class TestPriorBlockDismissal(unittest.TestCase):
         self.assertFalse(should_dismiss_prior_block('APPROVED', 'APPROVE'))
         self.assertFalse(should_dismiss_prior_block('COMMENTED', 'COMMENT'))
         self.assertFalse(should_dismiss_prior_block(None, 'APPROVE'))
+
+
+def thread(thread_id: str, path: str, line: int, title: str, resolved: bool = False,
+           comment_id: int = 11) -> dict[str, object]:
+    return {
+        'id': thread_id,
+        'isResolved': resolved,
+        'path': path,
+        'line': line,
+        'comments': {'nodes': [{'databaseId': comment_id, 'body': f'[bug/CONFIRMED] {title}'}]},
+    }
+
+
+class TestThreadMatching(unittest.TestCase):
+    def test_path_line_and_title_must_agree(self):
+        finding = prior_finding(path='src/a.ts', line=10, title='broken thing')
+        self.assertTrue(thread_matches(thread('t1', 'src/a.ts', 10, 'broken thing'), finding))
+        self.assertTrue(thread_matches(thread('t1', 'src/a.ts', 12, 'broken thing'), finding))
+        self.assertFalse(thread_matches(thread('t1', 'src/b.ts', 10, 'broken thing'), finding))
+        self.assertFalse(thread_matches(thread('t1', 'src/a.ts', 40, 'broken thing'), finding))
+        self.assertFalse(thread_matches(thread('t1', 'src/a.ts', 10, 'other thing'), finding))
+
+    def test_rephrased_titles_match_by_word_overlap(self):
+        finding = prior_finding(
+            path='src/a.ts', line=10,
+            title="Accessing undefined properties 'raw' on work object")
+        drifted = thread('t1', 'src/a.ts', 10, 'Accessing undefined properties raw executable argv on check work object')
+        self.assertTrue(thread_matches(drifted, finding))
+        unrelated = thread('t2', 'src/a.ts', 10, 'Missing test for parser')
+        self.assertFalse(thread_matches(unrelated, finding))
+
+
+class TestThreadActions(unittest.TestCase):
+    def test_withdrawn_resolves_matching_unresolved_threads(self):
+        finding = prior_finding(path='src/a.ts', line=10, title='broken thing')
+        resolutions = [Resolution(finding, 'WITHDRAWN', 'rebuttal verified', True)]
+        threads = [thread('t1', 'src/a.ts', 10, 'broken thing'),
+                   thread('t2', 'src/a.ts', 10, 'broken thing', resolved=True)]
+        resolve_ids, thread_replies, issue_replies = plan_thread_actions(resolutions, threads)
+        self.assertEqual(['t1'], resolve_ids)
+        self.assertEqual(1, len(thread_replies))
+        self.assertEqual('11', thread_replies[0][0])
+        self.assertEqual([], issue_replies)
+
+    def test_stands_replies_but_never_resolves(self):
+        finding = prior_finding(path='src/a.ts', line=10, title='broken thing')
+        resolutions = [Resolution(finding, 'STANDS', 'mechanism traced', True)]
+        threads = [thread('t1', 'src/a.ts', 10, 'broken thing')]
+        resolve_ids, thread_replies, issue_replies = plan_thread_actions(resolutions, threads)
+        self.assertEqual([], resolve_ids)
+        self.assertEqual(1, len(thread_replies))
+        self.assertEqual([], issue_replies)
+
+    def test_uncontested_stands_is_silent(self):
+        finding = prior_finding(path='src/a.ts', line=10, title='broken thing')
+        resolutions = [Resolution(finding, 'STANDS', 'no reply', False)]
+        resolve_ids, thread_replies, issue_replies = plan_thread_actions(resolutions, [thread('t1', 'src/a.ts', 10, 'broken thing')])
+        self.assertEqual(([], [], []), (resolve_ids, thread_replies, issue_replies))
+
+    def test_no_matching_thread_falls_back_to_issue_comment(self):
+        finding = prior_finding(path='src/a.ts', line=10, title='broken thing')
+        resolutions = [Resolution(finding, 'WITHDRAWN', 'rebuttal verified', True)]
+        resolve_ids, thread_replies, issue_replies = plan_thread_actions(resolutions, [])
+        self.assertEqual(([], [], [resolutions[0]]), (resolve_ids, thread_replies, issue_replies))
+
+    def test_outdated_resolves_too(self):
+        finding = prior_finding(path='src/a.ts', line=10, title='broken thing')
+        resolutions = [Resolution(finding, 'OUTDATED', 'file left the diff', False)]
+        resolve_ids, _, _ = plan_thread_actions(resolutions, [thread('t1', 'src/a.ts', 10, 'broken thing')])
+        self.assertEqual(['t1'], resolve_ids)
+
+
+class TestPriorSubstanceCarry(unittest.TestCase):
+    def test_stands_details_render_indented_and_parse_back(self):
+        finding = prior_finding(path='src/a.ts', line=10, title='broken thing')
+        resolutions = [Resolution(finding, 'STANDS', 'mechanism traced', True)]
+        body = render_review_body([], Coverage(), 'm', prior=resolutions)
+        self.assertIn('    - Trigger: concrete input', body)
+        parsed = parse_published_findings(body)
+        self.assertEqual(1, len(parsed))
+        carried = parsed[0]
+        self.assertEqual(('src/a.ts', 10), (carried.path, carried.line))
+        self.assertIn('- Trigger: concrete input', carried.block)
+        self.assertIn('- Mechanism: why it happens', carried.block)
+
+    def test_withdrawn_details_are_not_carried(self):
+        finding = prior_finding(path='src/a.ts', line=10, title='broken thing')
+        resolutions = [
+            Resolution(finding, 'STANDS', 'kept', True),
+            Resolution(prior_finding(path='src/b.ts', line=5, title='other'), 'WITHDRAWN', 'refuted', True),
+        ]
+        body = render_review_body([], Coverage(), 'm', prior=resolutions)
+        parsed = parse_published_findings(body)
+        self.assertEqual(1, len(parsed))
+        self.assertEqual('src/a.ts', parsed[0].path)
+        self.assertNotIn('other', parsed[0].block)
 
 
 class TestPriorDedup(unittest.TestCase):

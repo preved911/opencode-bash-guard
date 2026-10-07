@@ -43,6 +43,7 @@ MAX_FINDINGS = 10     # hard cap on published findings
 FOCUSED_MAX = 3       # extra security-focus passes on risky chunks
 MAX_CONTEXT_FILES = 6  # distinct files fetched for verification context
 CONTEXT_RADIUS = 30   # lines of file context shown to the verifier
+RESOLUTION_CONTEXT_RADIUS = 100  # wider window for re-adjudication: lines move between runs
 DEADLINE_SECONDS = 480  # overall deadline; checked before every model call
 
 TRANSIENT = {429, 500, 502, 503, 504}
@@ -644,13 +645,19 @@ class Resolution:
 
 FINDING_HEADER_RE = re.compile(r'^\*\*`(.+?):(\d+)` — (.+)\*\* `\[(\w+)/(\w+)\]`$')
 # Prior-section status lines carry standing findings across runs; withdrawn
-# and outdated entries are final and are not carried.
+# and outdated entries are final and are not carried. Indented detail lines
+# under a standing entry carry the original claim's substance so the next
+# re-adjudication validates the real finding, not a one-line ghost.
 PRIOR_ENTRY_RE = re.compile(
     r'^- \*\*`(.+?):(\d+)` — (.+)\*\* `\[prior (\w+)/(\w+)\]` — stands: (.*)$')
+PRIOR_FINAL_RE = re.compile(
+    r'^- \*\*`(.+?):(\d+)` — (.+)\*\* — (?:withdrawn|outdated): .*$')
+PRIOR_DETAIL_RE = re.compile(r'^ {4}(\S.*)$')
 
 
 def _prior_from_match(match: re.Match[str], block: list[str]) -> PriorFinding:
-    path, line, title, severity, verdict = match.groups()
+    groups = match.groups()
+    path, line, title, severity, verdict = groups[:5]
     return PriorFinding(path=path, line=int(line), title=title,
                         severity=severity, verdict=verdict, block='\n'.join(block))
 
@@ -658,29 +665,49 @@ def _prior_from_match(match: re.Match[str], block: list[str]) -> PriorFinding:
 def parse_published_findings(body: str) -> list[PriorFinding]:
     """Recover findings from a published review body; unparseable bodies yield [] (fail open to a fresh review)."""
     findings: list[PriorFinding] = []
-    header: re.Match[str] | None = None
-    block: list[str] = []
+    top_header: re.Match[str] | None = None
+    top_block: list[str] = []
+    prior_entry: re.Match[str] | None = None
+    prior_block: list[str] = []
+
+    def flush_top() -> None:
+        nonlocal top_header, top_block
+        if top_header is not None:
+            findings.append(_prior_from_match(top_header, top_block))
+            top_header, top_block = None, []
+
+    def flush_prior() -> None:
+        nonlocal prior_entry, prior_block
+        if prior_entry is not None:
+            findings.append(_prior_from_match(prior_entry, prior_block))
+            prior_entry, prior_block = None, []
+
     for line in body.splitlines():
-        match = FINDING_HEADER_RE.match(line)
-        prior_entry = PRIOR_ENTRY_RE.match(line)
-        if match:
-            if header is not None:
-                findings.append(_prior_from_match(header, block))
-            header = match
-            block = [line]
-        elif prior_entry:
-            if header is not None:
-                findings.append(_prior_from_match(header, block))
-                header = None
-                block = []
-            path, line, title, severity, verdict, _reason = prior_entry.groups()
-            findings.append(PriorFinding(path=path, line=int(line), title=title,
-                                         severity=severity, verdict=verdict,
-                                         block=line))
-        elif header is not None:
-            block.append(line)
-    if header is not None:
-        findings.append(_prior_from_match(header, block))
+        top_match = FINDING_HEADER_RE.match(line)
+        prior_match = PRIOR_ENTRY_RE.match(line)
+        final_match = PRIOR_FINAL_RE.match(line)
+        detail_match = PRIOR_DETAIL_RE.match(line)
+        if top_match:
+            flush_prior()
+            flush_top()
+            top_header, top_block = top_match, [line]
+        elif prior_match:
+            flush_prior()
+            flush_top()
+            prior_entry, prior_block = prior_match, [line]
+        elif final_match:
+            # A withdrawn or outdated entry is final: close whatever was open
+            # and drop the entry with its details.
+            flush_prior()
+            flush_top()
+        elif detail_match and prior_entry is not None:
+            prior_block.append(detail_match.group(1))
+        elif top_header is not None:
+            top_block.append(line)
+        elif prior_entry is not None:
+            prior_block.append(line)
+    flush_prior()
+    flush_top()
     return findings
 
 
@@ -923,6 +950,11 @@ def render_prior_section(resolutions: list[Resolution]) -> list[str]:
             parts.append(f'- **`{f.path}:{f.line}` — {f.title}** — outdated: {r.reason}')
         else:
             parts.append(f'- **`{f.path}:{f.line}` — {f.title}** `[prior {f.severity}/{f.verdict}]` — stands: {r.reason}')
+            # Standing findings carry their original claim's details forward:
+            # the next re-adjudication validates the real finding, not a ghost.
+            for detail in (line.strip() for line in f.block.splitlines()[1:]):
+                if detail:
+                    parts.append(f'    {detail}')
     return parts
 
 
@@ -1037,7 +1069,7 @@ def context_window(text: str, line: int, radius: int = CONTEXT_RADIUS) -> str:
     return '\n'.join(lines[start:end])
 
 
-def make_context_fetcher(gh: GhCtx, head_sha: str) -> Callable[[str, int], str]:
+def make_context_fetcher(gh: GhCtx, head_sha: str, radius: int = CONTEXT_RADIUS) -> Callable[[str, int], str]:
     """Fetch current file content around a line, bounded to MAX_CONTEXT_FILES files."""
     cache: dict[str, str] = {}
 
@@ -1050,7 +1082,7 @@ def make_context_fetcher(gh: GhCtx, head_sha: str) -> Callable[[str, int], str]:
                 f'/contents/{urllib.parse.quote(path)}?ref={head_sha}',
                 accept='application/vnd.github.raw')
             cache[path] = raw or ''
-        return context_window(cache[path], line)
+        return context_window(cache[path], line, radius)
 
     return fetch
 
@@ -1338,6 +1370,9 @@ def main() -> None:
     deadline = Deadline(DEADLINE_SECONDS)
     call, models_used = make_model_call(deadline)
     fetch_context = make_context_fetcher(gh, head_sha) if head_sha else None
+    # Re-adjudication validates the original claim against the current code,
+    # where lines may have moved: a wider window keeps the real target in view.
+    resolution_fetcher = make_context_fetcher(gh, head_sha, radius=RESOLUTION_CONTEXT_RADIUS) if head_sha else None
     budget = Budget()
     definitions = definitions_index(diff)
     if head_changed:
@@ -1355,7 +1390,7 @@ def main() -> None:
         coverage = Coverage(carried_incomplete=prior_incomplete)
 
     resolutions = resolve_prior_findings(
-        prior_findings, replies, call, deadline, budget, fetch_context,
+        prior_findings, replies, call, deadline, budget, resolution_fetcher,
         head_changed, listed, definitions) if prior_findings else []
     standing_prior_bugs = any(r.status == 'STANDS' and r.finding.severity == 'bug' for r in resolutions)
 
@@ -1395,13 +1430,9 @@ def main() -> None:
                 print('Blocking review could not be submitted — failing the job.', file=sys.stderr)
                 sys.exit(1)
 
-    # Dialogue continuation: a contested finding that still stands gets a
-    # direct reply in the thread where the author raised the objection.
-    # Runs before the coverage exit so the dialogue continues even when the
-    # run ends red.
-    for r in resolutions:
-        if r.status == 'STANDS' and r.contested:
-            _reply_to_rebuttal(gh, pr_num, r, replies)
+    # Dialogue continuation and closure, before the coverage exit so the
+    # dialogue progresses even when the run ends red.
+    continue_dialogue(gh, pr_num, resolutions, replies)
 
     if not coverage.complete():
         # Partially reviewed material must never look like a passed review:
@@ -1410,19 +1441,165 @@ def main() -> None:
         sys.exit(1)
 
 
-def _reply_to_rebuttal(gh: GhCtx, pr_num: str, resolution: Resolution, replies: list[dict[str, str]]) -> None:
-    body = (
-        f'**Prior finding stands: `{resolution.finding.path}:{resolution.finding.line}` — {resolution.finding.title}**\n\n'
-        f'{resolution.reason}\n\n'
-        'The finding remains part of the review verdict; details are in the latest review body.')
-    thread_ids = [r['id'] for r in replies if r['source'] == 'thread']
-    if thread_ids:
-        posted = gh_api(gh, f'/pulls/{pr_num}/comments', data={'in_reply_to': int(thread_ids[0]), 'body': body})
-    else:
-        posted = gh_api(gh, f'/issues/{pr_num}/comments', data={'body': body})
-    if not isinstance(posted, dict):
-        # The verdict is already published; a failed reply is noise, not a gap.
-        print('Replying to the rebuttal failed — the verdict is unaffected.', file=sys.stderr)
+GRAPHQL_THREADS_QUERY = '''
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100) {
+        nodes {
+          id
+          isResolved
+          path
+          line
+          comments(first: 20) {
+            nodes { databaseId body }
+          }
+        }
+      }
+    }
+  }
+}'''
+
+RESOLVE_THREAD_MUTATION = '''
+mutation($thread: ID!) {
+  resolveReviewThread(input: {threadId: $thread}) {
+    thread { isResolved }
+  }
+}'''
+
+
+def gh_graphql(gh: GhCtx, query: str, variables: dict[str, object]) -> dict[str, object] | None:
+    url = f'{gh.api}/graphql'
+    headers = {'Authorization': f'Bearer {gh.token}', 'Accept': 'application/vnd.github+json'}
+    status, text = http_request(url, headers=headers, data={'query': query, 'variables': variables}, method='POST')
+    if status != 200:
+        print(f'GraphQL error {status}', file=sys.stderr)
+        return None
+    data = json.loads(text)
+    if not isinstance(data, dict) or data.get('errors'):
+        print(f'GraphQL response unusable: {str(data)[:200]}', file=sys.stderr)
+        return None
+    return data.get('data') if isinstance(data.get('data'), dict) else None
+
+
+def fetch_review_threads(gh: GhCtx, pr_num: str) -> list[dict[str, object]]:
+    owner, _, name = gh.repo.partition('/')
+    data = gh_graphql(gh, GRAPHQL_THREADS_QUERY, {'owner': owner, 'name': name, 'number': int(pr_num)})
+    if data is None:
+        # Thread closure degrades to body-only reporting when threads are
+        # unavailable; the verdict is unaffected.
+        return []
+    repository = data.get('repository')
+    pr = repository.get('pullRequest') if isinstance(repository, dict) else None
+    threads = pr.get('reviewThreads') if isinstance(pr, dict) else None
+    nodes = threads.get('nodes') if isinstance(threads, dict) else None
+    if not isinstance(nodes, list):
+        return []
+    return [n for n in nodes if isinstance(n, dict)]
+
+
+def _titles_related(a: str, b: str) -> bool:
+    """Titles drift between runs (the model rephrases); equality or a >= 0.6
+    word-overlap still identifies the same finding."""
+    left = set(_norm_title(a).split())
+    right = set(_norm_title(b).split())
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    overlap = len(left & right) / min(len(left), len(right))
+    return overlap >= 0.6
+
+
+def thread_matches(thread: dict[str, object], finding: PriorFinding) -> bool:
+    if thread.get('path') != finding.path:
+        return False
+    line = thread.get('line')
+    if not isinstance(line, int) or abs(line - finding.line) > 3:
+        return False
+    comments = thread.get('comments')
+    nodes = comments.get('nodes') if isinstance(comments, dict) else []
+    for node in nodes if isinstance(nodes, list) else []:
+        body = node.get('body') if isinstance(node, dict) else None
+        if isinstance(body, str):
+            first = body.splitlines()[0] if body else ''
+            m = re.match(r'^\[(\w+)/(\w+)\]\s*(.+)$', first)
+            if m and _titles_related(m.group(3), finding.title):
+                return True
+    return False
+
+
+def plan_thread_actions(
+    resolutions: list[Resolution],
+    threads: list[dict[str, object]],
+) -> tuple[list[str], list[tuple[str, Resolution]], list[Resolution]]:
+    """Pure dialogue planner: (thread ids to resolve, in-thread replies, issue-comment replies).
+
+    WITHDRAWN and OUTDATED close their threads (reply + resolve); STANDS keeps
+    the dialogue open and only answers the author in the thread.
+    """
+    resolve_ids: list[str] = []
+    thread_replies: list[tuple[str, Resolution]] = []
+    issue_replies: list[Resolution] = []
+    for r in resolutions:
+        matched = [t for t in threads if thread_matches(t, r.finding)]
+        if r.status == 'STANDS':
+            if r.contested:
+                if matched:
+                    thread_replies.append((_first_comment_id(matched[0]), r))
+                else:
+                    issue_replies.append(r)
+            continue
+        for thread in matched:
+            if thread.get('isResolved'):
+                continue
+            resolve_ids.append(str(thread.get('id', '')))
+            thread_replies.append((_first_comment_id(thread), r))
+        if not matched and r.contested:
+            issue_replies.append(r)
+    return resolve_ids, thread_replies, issue_replies
+
+
+def _first_comment_id(thread: dict[str, object]) -> str:
+    comments = thread.get('comments')
+    nodes = comments.get('nodes') if isinstance(comments, dict) else []
+    for node in nodes if isinstance(nodes, list) else []:
+        if isinstance(node, dict) and isinstance(node.get('databaseId'), int):
+            return str(node['databaseId'])
+    return ''
+
+
+def _dialogue_reply_body(r: Resolution) -> str:
+    f = r.finding
+    if r.status == 'WITHDRAWN':
+        return (f'**Prior finding withdrawn: `{f.path}:{f.line}` — {f.title}**\n\n'
+                f'{r.reason}\n\n'
+                'Thread resolved — the finding no longer counts toward the review verdict.')
+    if r.status == 'OUTDATED':
+        return (f'**Prior finding outdated: `{f.path}:{f.line}` — {f.title}**\n\n'
+                f'{r.reason}\n\n'
+                'Thread resolved — the code it targeted is no longer part of the diff.')
+    return (f'**Prior finding stands: `{f.path}:{f.line}` — {f.title}**\n\n'
+            f'{r.reason}\n\n'
+            'The finding remains part of the review verdict; details are in the latest review body.')
+
+
+def continue_dialogue(gh: GhCtx, pr_num: str, resolutions: list[Resolution], replies: list[dict[str, str]]) -> None:
+    threads = fetch_review_threads(gh, pr_num)
+    resolve_ids, thread_replies, issue_replies = plan_thread_actions(resolutions, threads)
+    for comment_id, r in thread_replies:
+        if comment_id:
+            gh_api(gh, f'/pulls/{pr_num}/comments', data={'in_reply_to': int(comment_id), 'body': _dialogue_reply_body(r)})
+    for r in issue_replies:
+        gh_api(gh, f'/issues/{pr_num}/comments', data={'body': _dialogue_reply_body(r)})
+    for thread_id in resolve_ids:
+        result = gh_graphql(gh, RESOLVE_THREAD_MUTATION, {'thread': thread_id})
+        if result is None:
+            # An unresolved thread keeps the dialogue visibly open; the
+            # published verdict already records the withdrawal.
+            print(f'Resolving thread {thread_id} failed — it stays open.', file=sys.stderr)
+        else:
+            print(f'Resolved review thread {thread_id}')
 
 
 def _unquote_git_path(path: str) -> str:
