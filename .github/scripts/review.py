@@ -643,6 +643,10 @@ class Resolution:
 
 
 FINDING_HEADER_RE = re.compile(r'^\*\*`(.+?):(\d+)` — (.+)\*\* `\[(\w+)/(\w+)\]`$')
+# Prior-section status lines carry standing findings across runs; withdrawn
+# and outdated entries are final and are not carried.
+PRIOR_ENTRY_RE = re.compile(
+    r'^- \*\*`(.+?):(\d+)` — (.+)\*\* `\[prior (\w+)/(\w+)\]` — stands: (.*)$')
 
 
 def _prior_from_match(match: re.Match[str], block: list[str]) -> PriorFinding:
@@ -658,11 +662,21 @@ def parse_published_findings(body: str) -> list[PriorFinding]:
     block: list[str] = []
     for line in body.splitlines():
         match = FINDING_HEADER_RE.match(line)
+        prior_entry = PRIOR_ENTRY_RE.match(line)
         if match:
             if header is not None:
                 findings.append(_prior_from_match(header, block))
             header = match
             block = [line]
+        elif prior_entry:
+            if header is not None:
+                findings.append(_prior_from_match(header, block))
+                header = None
+                block = []
+            path, line, title, severity, verdict, _reason = prior_entry.groups()
+            findings.append(PriorFinding(path=path, line=int(line), title=title,
+                                         severity=severity, verdict=verdict,
+                                         block=line))
         elif header is not None:
             block.append(line)
     if header is not None:
@@ -766,7 +780,7 @@ def resolve_prior_findings(
         try:
             data = call(resolution_messages(
                 finding, [r['body'] for r in replies], context,
-                definitions_for(definitions or {}, finding.block)))
+                definitions_for(definitions or {}, finding.block, context)))
         except Exception:
             resolutions.append(Resolution(finding, 'STANDS', 'resolution call failed', contested))
             continue
@@ -997,12 +1011,20 @@ def definitions_index(diff_text: str) -> dict[str, str]:
     return index
 
 
-def definitions_for(index: dict[str, str], text: str, limit: int = 4) -> str:
-    """Render the definitions of identifiers mentioned in the finding text."""
+def definitions_for(index: dict[str, str], *texts: str, limit: int = 4) -> str:
+    """Render the definitions of identifiers mentioned in the finding or its file context.
+
+    Findings can name a wrong-but-existing symbol (a hallucinated near-match);
+    the file context around the finding carries the real annotation, so both
+    sources are scanned, finding text first.
+    """
     names: list[str] = []
-    for name in IDENTIFIER_RE.findall(text):
-        if name in index and name not in names:
-            names.append(name)
+    for text in texts:
+        for name in IDENTIFIER_RE.findall(text):
+            if name in index and name not in names:
+                names.append(name)
+            if len(names) >= limit:
+                break
         if len(names) >= limit:
             break
     return '\n\n'.join(
@@ -1109,7 +1131,7 @@ def _verify_candidates(
         try:
             raw = call(verifier_messages(
                 cand, chunks[cand.chunk_index - 1], context,
-                definitions_for(definitions or {}, f'{cand.title} {cand.mechanism} {cand.effect}')))
+                definitions_for(definitions or {}, f'{cand.title} {cand.mechanism} {cand.effect}', context)))
         except RuntimeError as e:
             print(f'verification failed for {cand.path}:{cand.line}: {e}', file=sys.stderr)
             coverage.unverified += 1

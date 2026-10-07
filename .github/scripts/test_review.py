@@ -639,6 +639,22 @@ class TestPublishedFindingsParsing(unittest.TestCase):
         self.assertEqual([], parse_published_findings(''))
         self.assertEqual([], parse_published_findings('**`no-line-number` — t** `[bug/x]`'))
 
+    def test_prior_stands_entries_carry_forward(self):
+        body = (
+            '## 👀 AI Code Review\n\n'
+            '**`src/a.ts:1` — fresh bug** `[bug/CONFIRMED]`\n'
+            '- Trigger: t\n\n'
+            '### Prior findings\n\n'
+            '- **`src/b.ts:5` — standing nit** `[prior nit/CONFIRMED]` — stands: rebuttal unconvincing\n'
+            '- **`src/c.ts:7` — resolved bug** `[prior bug/CONFIRMED]` — withdrawn: rebuttal verified\n'
+            '- **`src/d.ts:9` — moved bug** `[prior bug/CONFIRMED]` — outdated: file left the diff\n'
+        )
+        parsed = parse_published_findings(body)
+        self.assertEqual(2, len(parsed))
+        self.assertEqual(('src/a.ts', 1), (parsed[0].path, parsed[0].line))
+        self.assertEqual(('src/b.ts', 5), (parsed[1].path, parsed[1].line))
+        self.assertEqual('nit', parsed[1].severity)
+
     def test_multiple_findings_and_trailing_sections(self):
         body = ('## 👀 AI Code Review\n\n'
                 + render_finding(Finding(candidate_from(finding_dict('a.ts', 1), build_chunks(section('a.ts', ['x']))[0][0]), 'bug', 'CONFIRMED'))
@@ -817,6 +833,16 @@ class TestDefinitions(unittest.TestCase):
         index = {f'Type{i}': f'block{i}' for i in range(6)}
         rendered = definitions_for(index, 'Type0 Type1 Type2 Type3 Type4 Type5')
         self.assertEqual(4, rendered.count('Definition of'))
+
+    def test_definitions_for_scans_context_after_finding_text(self):
+        # the finding names a wrong-but-existing symbol; the file context
+        # carries the real annotation and must supply its definition too
+        index = {'SelectedCheckWork': 'wrong symbol shape', 'SegmentCheckWork': 'real shape with command object'}
+        rendered = definitions_for(index, 'SelectedCheckWork carries a NormalizedCheck',
+                                   'function run(work: SegmentCheckWork) { work.command.raw }')
+        self.assertIn('Definition of `SelectedCheckWork`', rendered)
+        self.assertIn('Definition of `SegmentCheckWork`', rendered)
+        self.assertIn('real shape with command object', rendered)
 
     def test_resolver_payload_includes_definitions(self):
         index = {'SegmentCheckWork': 'the real interface'}
